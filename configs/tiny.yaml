@@ -1,7 +1,4 @@
 tokenizer:
-  patch_size: 8
-  vocab_size: 4096
-  min_freq: 1
   add_bos: true
   add_eos: true
 

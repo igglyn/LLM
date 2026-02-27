@@ -30,12 +30,8 @@ def main():
     if not texts:
         raise RuntimeError("No text files found in data/raw path.")
 
-    tok_cfg = cfg["tokenizer"]
-    tokenizer = FixedPatchTokenizer(
-        patch_size=tok_cfg["patch_size"],
-        vocab_size=tok_cfg["vocab_size"],
-        min_freq=tok_cfg.get("min_freq", 1),
-    )
+    tok_cfg = cfg.get("tokenizer", {})
+    tokenizer = FixedPatchTokenizer()
     tokenizer.fit(texts)
 
     add_bos = tok_cfg.get("add_bos", True)
