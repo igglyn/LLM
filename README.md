@@ -32,5 +32,5 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 
 ## Notes
 
-- Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens.
+- Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens, and configurable `tokenizer.patch_size` chunking.
 - Prioritizes tokenizer coherence and minimal code over model quality.

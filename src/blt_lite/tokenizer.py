@@ -13,13 +13,17 @@ class SpecialTokens:
 
 
 class FixedPatchTokenizer:
-    """Byte-identity tokenizer.
+    """Byte-identity tokenizer with configurable patch length.
 
     Maps each raw byte value directly to its integer token ID (0..255), plus
-    optional BOS/EOS tokens appended at the end of the vocabulary.
+    optional BOS/EOS tokens appended at the end of the vocabulary. `patch_size`
+    controls how bytes are chunked internally for patch experiments.
     """
 
-    def __init__(self):
+    def __init__(self, patch_size: int = 1):
+        if patch_size <= 0:
+            raise ValueError("patch_size must be > 0")
+        self.patch_size = patch_size
         self.special = SpecialTokens()
         self.byte_vocab_size = 256
         self.special_tokens = [self.special.bos, self.special.eos]
@@ -33,6 +37,10 @@ class FixedPatchTokenizer:
         self.id_to_patch: dict[int, str] = {
             idx: tok for tok, idx in self.patch_to_id.items()
         }
+
+    def _iter_patches(self, raw: bytes) -> Iterable[bytes]:
+        for i in range(0, len(raw), self.patch_size):
+            yield raw[i : i + self.patch_size]
 
     def fit(self, texts: Iterable[str]) -> None:
         # Identity byte tokenizer has a fixed vocabulary; fit is a no-op.
@@ -55,7 +63,8 @@ class FixedPatchTokenizer:
         ids: list[int] = []
         if add_bos:
             ids.append(self.bos_id)
-        ids.extend(int(b) for b in raw)
+        for patch in self._iter_patches(raw):
+            ids.extend(int(b) for b in patch)
         if add_eos:
             ids.append(self.eos_id)
         return ids
@@ -78,6 +87,7 @@ class FixedPatchTokenizer:
             total += len(self.encode(text, add_bos=add_bos, add_eos=add_eos))
         return {
             "tokenizer": "byte_identity",
+            "patch_size": self.patch_size,
             "vocab_size": self.vocab_len,
             "byte_vocab_size": self.byte_vocab_size,
             "total_tokens": total,
@@ -87,6 +97,7 @@ class FixedPatchTokenizer:
     def save(self, path: str | Path) -> None:
         payload = {
             "tokenizer_type": "byte_identity",
+            "patch_size": self.patch_size,
             "byte_vocab_size": self.byte_vocab_size,
             "special_tokens": self.special_tokens,
             "patch_to_id": self.patch_to_id,
@@ -99,7 +110,7 @@ class FixedPatchTokenizer:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
 
-        tok = cls()
+        tok = cls(patch_size=int(payload.get("patch_size", 1)))
         loaded_vocab = payload.get("patch_to_id")
         if loaded_vocab:
             tok.patch_to_id = {k: int(v) for k, v in loaded_vocab.items()}

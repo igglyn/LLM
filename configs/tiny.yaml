@@ -1,4 +1,5 @@
 tokenizer:
+  patch_size: 1
   add_bos: true
   add_eos: true
 
