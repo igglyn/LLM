@@ -1,0 +1,3 @@
+Hello world. This is a tiny corpus for BLT-lite.
+We care about tokenizer patch coherence more than fluent generation.
+Fixed-size byte patches make experiments easy.
