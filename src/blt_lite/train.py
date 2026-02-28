@@ -20,11 +20,13 @@ def build_dataloaders(train_path: Path, val_path: Path, seq_len: int, batch_size
     return train_dl, val_dl
 
 
-def evaluate(model: TinyPatchLM, val_loader: DataLoader, device: torch.device) -> float:
+def evaluate(model: TinyPatchLM, val_loader: DataLoader, device: torch.device, max_batches: int | None = None) -> float:
     model.eval()
     losses = []
     with torch.no_grad():
-        for x, y in val_loader:
+        for batch_idx, (x, y) in enumerate(val_loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
             x = x.to(device)
             y = y.to(device)
             _, loss = model(x, y)

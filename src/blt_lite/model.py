@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,15 +12,22 @@ class TinyPatchLM(nn.Module):
         self,
         vocab_size: int,
         seq_len: int,
+        patch_size: int = 1,
         d_model: int = 384,
         n_layers: int = 6,
         n_heads: int = 6,
         dropout: float = 0.1,
     ):
         super().__init__()
+        if patch_size <= 0:
+            raise ValueError("patch_size must be > 0")
         self.seq_len = seq_len
+        self.patch_size = patch_size
+        self.max_patch_len = math.ceil(seq_len / patch_size)
+
         self.token_emb = nn.Embedding(vocab_size, d_model)
-        self.pos_emb = nn.Embedding(seq_len, d_model)
+        self.patch_pos_emb = nn.Embedding(self.max_patch_len, d_model)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
@@ -33,17 +42,39 @@ class TinyPatchLM(nn.Module):
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight
 
-    def forward(self, x: torch.Tensor, targets: torch.Tensor | None = None):
-        bsz, t = x.shape
+    def _patchify(self, token_hidden: torch.Tensor) -> tuple[torch.Tensor, int]:
+        bsz, t, d_model = token_hidden.shape
         if t > self.seq_len:
             raise ValueError(f"sequence length {t} exceeds model limit {self.seq_len}")
-        pos = torch.arange(0, t, device=x.device).unsqueeze(0)
-        h = self.token_emb(x) + self.pos_emb(pos)
-        mask = torch.full((t, t), float("-inf"), device=x.device)
-        mask = torch.triu(mask, diagonal=1)
-        h = self.blocks(h, mask=mask)
-        h = self.ln_f(h)
-        logits = self.lm_head(h)
+
+        padded_t = math.ceil(t / self.patch_size) * self.patch_size
+        if padded_t != t:
+            pad = torch.zeros((bsz, padded_t - t, d_model), device=token_hidden.device, dtype=token_hidden.dtype)
+            token_hidden = torch.cat([token_hidden, pad], dim=1)
+
+        n_patches = padded_t // self.patch_size
+        patch_hidden = token_hidden.view(bsz, n_patches, self.patch_size, d_model).mean(dim=2)
+        return patch_hidden, t
+
+    def _unpatchify(self, patch_hidden: torch.Tensor, original_t: int) -> torch.Tensor:
+        token_hidden = patch_hidden.repeat_interleave(self.patch_size, dim=1)
+        return token_hidden[:, :original_t, :]
+
+    def forward(self, x: torch.Tensor, targets: torch.Tensor | None = None):
+        token_hidden = self.token_emb(x)
+        patch_hidden, original_t = self._patchify(token_hidden)
+
+        _, patch_t, _ = patch_hidden.shape
+        pos = torch.arange(0, patch_t, device=x.device).unsqueeze(0)
+        patch_hidden = patch_hidden + self.patch_pos_emb(pos)
+
+        patch_mask = torch.full((patch_t, patch_t), float("-inf"), device=x.device)
+        patch_mask = torch.triu(patch_mask, diagonal=1)
+        patch_hidden = self.blocks(patch_hidden, mask=patch_mask)
+
+        token_hidden = self._unpatchify(patch_hidden, original_t)
+        token_hidden = self.ln_f(token_hidden)
+        logits = self.lm_head(token_hidden)
 
         loss = None
         if targets is not None:

@@ -1,0 +1,742 @@
+
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..06fe14295852147b68d39fdee07386db9d181256
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,38 @@
++# BLT Lite
++
++A small local playground for byte-identity tokenization and a tiny byte-level language model.
++
++## Quickstart
++
++1. Install dependencies:
++
++```bash
++pip install -r requirements.txt
++```
++
++2. Add one or more `.txt` files to `data/raw/`.
++
++3. Prepare tokenizer + encoded dataset:
++
++```bash
++python scripts/prepare_data.py --config configs/tiny.yaml
++```
++
++4. Train tiny model:
++
++```bash
++python scripts/train_tiny.py --config configs/tiny.yaml
++```
++
++5. Sample:
++
++```bash
++python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
++```
++
++## Notes
++
++- Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens, and configurable `tokenizer.patch_size` chunking.
++- Latent model path is patch-based internally: token embeddings are patchified, processed in latent patch space, then unpatchified back to token logits.
++- Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
++- Prioritizes tokenizer coherence and minimal code over model quality.
+diff --git a/configs/tiny.yaml b/configs/tiny.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb4344e480a2ae685470b049ec7431110f9b6003
+--- /dev/null
++++ b/configs/tiny.yaml
+@@ -0,0 +1,37 @@
++tokenizer:
++  patch_size: 1
++  add_bos: true
++  add_eos: true
++
++data:
++  raw_path: data/raw
++  pattern: "*.txt"
++  processed_dir: data/processed
++  train_split: 0.95
++  seq_len: 256
++
++model:
++  d_model: 384
++  n_layers: 6
++  n_heads: 6
++  dropout: 0.1
++
++train:
++  seed: 42
++  batch_size: 8
++  grad_accum_steps: 4
++  max_steps: 15000
++  eval_every: 100
++  eval_batches: 50
++  save_every: 200
++  lr_max: 0.0003
++  lr_min: 0.00003
++  warmup_steps: 1000
++  weight_decay: 0.1
++  grad_clip: 1.0
++  out_dir: outputs
++
++sample:
++  temperature: 0.9
++  top_k: 40
++  max_new_tokens: 128
+diff --git a/data/raw/sample.txt b/data/raw/sample.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..185b24191256723d00c36c411c4d1e219b278266
+--- /dev/null
++++ b/data/raw/sample.txt
+@@ -0,0 +1,3 @@
++Hello world. This is a tiny corpus for BLT-lite.
++We care about tokenizer patch coherence more than fluent generation.
++Fixed-size byte patches make experiments easy.
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..54d28e931934da3fa19de308fffc57143588b574
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,3 @@
++torch>=2.1
++numpy>=1.24
++pyyaml>=6.0
+diff --git a/scripts/prepare_data.py b/scripts/prepare_data.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d5121f72bedebb7640ce1ce78570adfffb543a5
+--- /dev/null
++++ b/scripts/prepare_data.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++SRC = ROOT / "src"
++if str(SRC) not in sys.path:
++    sys.path.insert(0, str(SRC))
++
++import argparse
++import json
++
++import numpy as np
++
++from blt_lite.dataset import TextFolderProvider
++from blt_lite.tokenizer import FixedPatchTokenizer
++from blt_lite.utils import ensure_dir, load_config
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--config", required=True)
++    args = parser.parse_args()
++
++    cfg = load_config(args.config)
++    provider = TextFolderProvider(cfg["data"]["raw_path"], cfg["data"].get("pattern", "*.txt"))
++    texts = list(provider.iter_texts())
++    if not texts:
++        raise RuntimeError("No text files found in data/raw path.")
++
++    tok_cfg = cfg.get("tokenizer", {})
++    tokenizer = FixedPatchTokenizer(patch_size=int(tok_cfg.get("patch_size", 1)))
++    tokenizer.fit(texts)
++
++    add_bos = tok_cfg.get("add_bos", True)
++    add_eos = tok_cfg.get("add_eos", True)
++    all_ids = []
++    for text in texts:
++        all_ids.extend(tokenizer.encode(text, add_bos=add_bos, add_eos=add_eos))
++    all_ids = np.asarray(all_ids, dtype=np.int32)
++
++    split = int(len(all_ids) * float(cfg["data"].get("train_split", 0.95)))
++    train_ids = all_ids[:split]
++    val_ids = all_ids[split:]
++
++    out_dir = ensure_dir(cfg["data"]["processed_dir"])
++    np.save(out_dir / "train_tokens.npy", train_ids)
++    np.save(out_dir / "val_tokens.npy", val_ids)
++    tokenizer.save(out_dir / "tokenizer.json")
++
++    diagnostics = tokenizer.diagnostics(texts, add_bos=add_bos, add_eos=add_eos)
++    with open(out_dir / "diagnostics.json", "w", encoding="utf-8") as f:
++        json.dump(diagnostics, f, indent=2)
++
++    print(f"Prepared data in {out_dir}")
++    print(json.dumps(diagnostics, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/sample_tiny.py b/scripts/sample_tiny.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a32ccbae34589215fa0a066446b7c6a36fb642ba
+--- /dev/null
++++ b/scripts/sample_tiny.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++SRC = ROOT / "src"
++if str(SRC) not in sys.path:
++    sys.path.insert(0, str(SRC))
++
++import argparse
++
++import torch
++
++from blt_lite.model import TinyPatchLM
++from blt_lite.tokenizer import FixedPatchTokenizer
++from blt_lite.utils import get_device, load_config
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--config", required=True)
++    parser.add_argument("--prompt", required=True)
++    parser.add_argument("--checkpoint", default="best.pt")
++    args = parser.parse_args()
++
++    cfg = load_config(args.config)
++    device = get_device()
++
++    processed_dir = Path(cfg["data"]["processed_dir"])
++    tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
++
++    train_cfg = cfg["train"]
++    ckpt = torch.load(Path(train_cfg.get("out_dir", "outputs")) / args.checkpoint, map_location=device)
++
++    model = TinyPatchLM(
++        vocab_size=tokenizer.vocab_len,
++        seq_len=int(cfg["data"]["seq_len"]),
++        patch_size=int(getattr(tokenizer, "patch_size", cfg.get("tokenizer", {}).get("patch_size", 1))),
++        d_model=int(cfg["model"]["d_model"]),
++        n_layers=int(cfg["model"]["n_layers"]),
++        n_heads=int(cfg["model"]["n_heads"]),
++        dropout=float(cfg["model"]["dropout"]),
++    ).to(device)
++    model.load_state_dict(ckpt["model"])
++    model.eval()
++
++    token_ids = tokenizer.encode(args.prompt, add_bos=True, add_eos=False)
++    idx = torch.tensor([token_ids], dtype=torch.long, device=device)
++
++    out = model.generate(
++        idx,
++        max_new_tokens=int(cfg["sample"]["max_new_tokens"]),
++        temperature=float(cfg["sample"]["temperature"]),
++        top_k=int(cfg["sample"]["top_k"]),
++    )
++    out_ids = out[0].tolist()
++    text = tokenizer.decode(out_ids)
++
++    print("Generated IDs:", out_ids)
++    print("Generated text:\n", text)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/train_tiny.py b/scripts/train_tiny.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9c1f75cc927909c5a51c41b71196edba0c90975
+--- /dev/null
++++ b/scripts/train_tiny.py
+@@ -0,0 +1,131 @@
++#!/usr/bin/env python
++from __future__ import annotations
++
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++SRC = ROOT / "src"
++if str(SRC) not in sys.path:
++    sys.path.insert(0, str(SRC))
++
++import argparse
++import math
++
++import torch
++from torch.optim import AdamW
++
++from blt_lite.model import TinyPatchLM
++from blt_lite.tokenizer import FixedPatchTokenizer
++from blt_lite.train import build_dataloaders, evaluate
++from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
++
++
++def warmup_cosine_lr(step: int, max_steps: int, warmup_steps: int, lr_max: float, lr_min: float) -> float:
++    if step < warmup_steps:
++        return lr_max * (step + 1) / max(1, warmup_steps)
++
++    decay_total = max(1, max_steps - warmup_steps)
++    decay_step = min(step - warmup_steps, decay_total)
++    cosine = 0.5 * (1 + math.cos(math.pi * decay_step / decay_total))
++    return lr_min + (lr_max - lr_min) * cosine
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--config", required=True)
++    args = parser.parse_args()
++
++    cfg = load_config(args.config)
++    tcfg = cfg["train"]
++    set_seed(int(tcfg.get("seed", 42)))
++
++    device = get_device()
++    processed_dir = Path(cfg["data"]["processed_dir"])
++    tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
++    seq_len = int(cfg["data"]["seq_len"])
++
++    train_loader, val_loader = build_dataloaders(
++        processed_dir / "train_tokens.npy",
++        processed_dir / "val_tokens.npy",
++        seq_len=seq_len,
++        batch_size=int(tcfg["batch_size"]),
++    )
++
++    model = TinyPatchLM(
++        vocab_size=tokenizer.vocab_len,
++        seq_len=seq_len,
++        patch_size=int(getattr(tokenizer, "patch_size", cfg.get("tokenizer", {}).get("patch_size", 1))),
++        d_model=int(cfg["model"]["d_model"]),
++        n_layers=int(cfg["model"]["n_layers"]),
++        n_heads=int(cfg["model"]["n_heads"]),
++        dropout=float(cfg["model"]["dropout"]),
++    ).to(device)
++
++    optimizer = AdamW(model.parameters(), lr=float(tcfg.get("lr_max", 3e-4)), weight_decay=float(tcfg["weight_decay"]))
++    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
++
++    out_dir = ensure_dir(tcfg.get("out_dir", "outputs"))
++    max_steps = int(tcfg["max_steps"])
++    eval_every = int(tcfg.get("eval_every", 100))
++    save_every = int(tcfg.get("save_every", 200))
++    grad_accum_steps = int(tcfg.get("grad_accum_steps", 1))
++    grad_clip = float(tcfg.get("grad_clip", 1.0))
++    lr_max = float(tcfg.get("lr_max", 3e-4))
++    lr_min = float(tcfg.get("lr_min", 3e-5))
++    warmup_steps = int(tcfg.get("warmup_steps", 1000))
++    eval_batches = int(tcfg.get("eval_batches", 50))
++
++    step = 0
++    best_val = float("inf")
++    model.train()
++    while step < max_steps:
++        for x, y in train_loader:
++            x, y = x.to(device), y.to(device)
++            lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min)
++            for group in optimizer.param_groups:
++                group["lr"] = lr
++
++            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
++                _, loss = model(x, y)
++                loss = loss / grad_accum_steps
++
++            scaler.scale(loss).backward()
++
++            if (step + 1) % grad_accum_steps == 0:
++                scaler.unscale_(optimizer)
++                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
++                scaler.step(optimizer)
++                scaler.update()
++                optimizer.zero_grad(set_to_none=True)
++
++            if step % 20 == 0:
++                print(f"step={step} train_loss={loss.item() * grad_accum_steps:.4f} lr={lr:.6f}")
++
++            if step % eval_every == 0 and step > 0:
++                val_loss = evaluate(model, val_loader, device, max_batches=eval_batches)
++                print(f"step={step} val_loss={val_loss:.4f}")
++                if val_loss < best_val:
++                    best_val = val_loss
++                    torch.save(
++                        {
++                            "model": model.state_dict(),
++                            "config": cfg,
++                            "val_loss": val_loss,
++                        },
++                        out_dir / "best.pt",
++                    )
++
++            if step % save_every == 0 and step > 0:
++                torch.save({"model": model.state_dict(), "config": cfg}, out_dir / f"step_{step}.pt")
++
++            step += 1
++            if step >= max_steps:
++                break
++
++    torch.save({"model": model.state_dict(), "config": cfg}, out_dir / "last.pt")
++    print(f"Training complete. Outputs in {out_dir}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/blt_lite/__init__.py b/src/blt_lite/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..64d2a78178bb2e86df382a3d19bd02bc59c1f1e0
+--- /dev/null
++++ b/src/blt_lite/__init__.py
+@@ -0,0 +1,6 @@
++"""BLT Lite package."""
++
++from .tokenizer import ByteIdentityTokenizer, FixedPatchTokenizer
++from .model import TinyPatchLM
++
++__all__ = ["FixedPatchTokenizer", "ByteIdentityTokenizer", "TinyPatchLM"]
+diff --git a/src/blt_lite/dataset.py b/src/blt_lite/dataset.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4da0dfc7765bf0ec92cadc0729382c94f8aef99b
+--- /dev/null
++++ b/src/blt_lite/dataset.py
+@@ -0,0 +1,34 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++
++import numpy as np
++import torch
++from torch.utils.data import Dataset
++
++
++@dataclass
++class TextFolderProvider:
++    root: str
++    pattern: str = "*.txt"
++
++    def iter_texts(self):
++        for path in sorted(Path(self.root).glob(self.pattern)):
++            yield path.read_text(encoding="utf-8")
++
++
++class TokenSequenceDataset(Dataset):
++    def __init__(self, tokens: np.ndarray, seq_len: int):
++        if len(tokens) <= seq_len:
++            raise ValueError("Not enough tokens for sequence length")
++        self.tokens = torch.from_numpy(tokens.astype(np.int64))
++        self.seq_len = seq_len
++
++    def __len__(self) -> int:
++        return len(self.tokens) - self.seq_len - 1
++
++    def __getitem__(self, idx: int):
++        x = self.tokens[idx : idx + self.seq_len]
++        y = self.tokens[idx + 1 : idx + self.seq_len + 1]
++        return x, y
+diff --git a/src/blt_lite/model.py b/src/blt_lite/model.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8730fec163ff8af484696d8acf26b5082cfb30ea
+--- /dev/null
++++ b/src/blt_lite/model.py
+@@ -0,0 +1,96 @@
++from __future__ import annotations
++
++import math
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++
++class TinyPatchLM(nn.Module):
++    def __init__(
++        self,
++        vocab_size: int,
++        seq_len: int,
++        patch_size: int = 1,
++        d_model: int = 384,
++        n_layers: int = 6,
++        n_heads: int = 6,
++        dropout: float = 0.1,
++    ):
++        super().__init__()
++        if patch_size <= 0:
++            raise ValueError("patch_size must be > 0")
++        self.seq_len = seq_len
++        self.patch_size = patch_size
++        self.max_patch_len = math.ceil(seq_len / patch_size)
++
++        self.token_emb = nn.Embedding(vocab_size, d_model)
++        self.patch_pos_emb = nn.Embedding(self.max_patch_len, d_model)
++
++        encoder_layer = nn.TransformerEncoderLayer(
++            d_model=d_model,
++            nhead=n_heads,
++            dim_feedforward=d_model * 4,
++            dropout=dropout,
++            activation="gelu",
++            batch_first=True,
++            norm_first=True,
++        )
++        self.blocks = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
++        self.ln_f = nn.LayerNorm(d_model)
++        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
++        self.lm_head.weight = self.token_emb.weight
++
++    def _patchify(self, token_hidden: torch.Tensor) -> tuple[torch.Tensor, int]:
++        bsz, t, d_model = token_hidden.shape
++        if t > self.seq_len:
++            raise ValueError(f"sequence length {t} exceeds model limit {self.seq_len}")
++
++        padded_t = math.ceil(t / self.patch_size) * self.patch_size
++        if padded_t != t:
++            pad = torch.zeros((bsz, padded_t - t, d_model), device=token_hidden.device, dtype=token_hidden.dtype)
++            token_hidden = torch.cat([token_hidden, pad], dim=1)
++
++        n_patches = padded_t // self.patch_size
++        patch_hidden = token_hidden.view(bsz, n_patches, self.patch_size, d_model).mean(dim=2)
++        return patch_hidden, t
++
++    def _unpatchify(self, patch_hidden: torch.Tensor, original_t: int) -> torch.Tensor:
++        token_hidden = patch_hidden.repeat_interleave(self.patch_size, dim=1)
++        return token_hidden[:, :original_t, :]
++
++    def forward(self, x: torch.Tensor, targets: torch.Tensor | None = None):
++        token_hidden = self.token_emb(x)
++        patch_hidden, original_t = self._patchify(token_hidden)
++
++        _, patch_t, _ = patch_hidden.shape
++        pos = torch.arange(0, patch_t, device=x.device).unsqueeze(0)
++        patch_hidden = patch_hidden + self.patch_pos_emb(pos)
++
++        patch_mask = torch.full((patch_t, patch_t), float("-inf"), device=x.device)
++        patch_mask = torch.triu(patch_mask, diagonal=1)
++        patch_hidden = self.blocks(patch_hidden, mask=patch_mask)
++
++        token_hidden = self._unpatchify(patch_hidden, original_t)
++        token_hidden = self.ln_f(token_hidden)
++        logits = self.lm_head(token_hidden)
++
++        loss = None
++        if targets is not None:
++            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
++        return logits, loss
++
++    @torch.no_grad()
++    def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: int = 0):
++        for _ in range(max_new_tokens):
++            idx_cond = idx[:, -self.seq_len :]
++            logits, _ = self(idx_cond)
++            logits = logits[:, -1, :] / max(1e-5, temperature)
++            if top_k > 0:
++                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
++                logits[logits < v[:, [-1]]] = -float("inf")
++            probs = torch.softmax(logits, dim=-1)
++            next_token = torch.multinomial(probs, num_samples=1)
++            idx = torch.cat((idx, next_token), dim=1)
++        return idx
+diff --git a/src/blt_lite/tokenizer.py b/src/blt_lite/tokenizer.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fae2fc8eeb4ed9c8b577146fefac3eeffe06c4b
+--- /dev/null
++++ b/src/blt_lite/tokenizer.py
+@@ -0,0 +1,121 @@
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Iterable
++
++
++@dataclass(frozen=True)
++class SpecialTokens:
++    bos: str = "<BOS>"
++    eos: str = "<EOS>"
++
++
++class FixedPatchTokenizer:
++    """Byte-identity tokenizer with configurable patch length.
++
++    Maps each raw byte value directly to its integer token ID (0..255), plus
++    optional BOS/EOS tokens appended at the end of the vocabulary. `patch_size`
++    controls how bytes are chunked internally for patch experiments.
++    """
++
++    def __init__(self, patch_size: int = 1):
++        if patch_size <= 0:
++            raise ValueError("patch_size must be > 0")
++        self.patch_size = patch_size
++        self.special = SpecialTokens()
++        self.byte_vocab_size = 256
++        self.special_tokens = [self.special.bos, self.special.eos]
++
++        self.patch_to_id: dict[str, int] = {
++            str(i): i for i in range(self.byte_vocab_size)
++        }
++        self.patch_to_id[self.special.bos] = self.byte_vocab_size
++        self.patch_to_id[self.special.eos] = self.byte_vocab_size + 1
++
++        self.id_to_patch: dict[int, str] = {
++            idx: tok for tok, idx in self.patch_to_id.items()
++        }
++
++    def _iter_patches(self, raw: bytes) -> Iterable[bytes]:
++        for i in range(0, len(raw), self.patch_size):
++            yield raw[i : i + self.patch_size]
++
++    def fit(self, texts: Iterable[str]) -> None:
++        # Identity byte tokenizer has a fixed vocabulary; fit is a no-op.
++        _ = texts
++
++    @property
++    def bos_id(self) -> int:
++        return self.patch_to_id[self.special.bos]
++
++    @property
++    def eos_id(self) -> int:
++        return self.patch_to_id[self.special.eos]
++
++    @property
++    def vocab_len(self) -> int:
++        return len(self.patch_to_id)
++
++    def encode(self, text: str, add_bos: bool = True, add_eos: bool = True) -> list[int]:
++        raw = text.encode("utf-8")
++        ids: list[int] = []
++        if add_bos:
++            ids.append(self.bos_id)
++        for patch in self._iter_patches(raw):
++            ids.extend(int(b) for b in patch)
++        if add_eos:
++            ids.append(self.eos_id)
++        return ids
++
++    def decode(self, ids: list[int], strip_special: bool = True) -> str:
++        out = bytearray()
++        for idx in ids:
++            if idx in (self.bos_id, self.eos_id):
++                if not strip_special:
++                    marker = self.id_to_patch[idx].encode("utf-8")
++                    out.extend(marker)
++                continue
++            if 0 <= idx < self.byte_vocab_size:
++                out.append(idx)
++        return bytes(out).decode("utf-8", errors="replace")
++
++    def diagnostics(self, texts: Iterable[str], add_bos: bool = True, add_eos: bool = True) -> dict:
++        total = 0
++        for text in texts:
++            total += len(self.encode(text, add_bos=add_bos, add_eos=add_eos))
++        return {
++            "tokenizer": "byte_identity",
++            "patch_size": self.patch_size,
++            "vocab_size": self.vocab_len,
++            "byte_vocab_size": self.byte_vocab_size,
++            "total_tokens": total,
++            "has_unk": False,
++        }
++
++    def save(self, path: str | Path) -> None:
++        payload = {
++            "tokenizer_type": "byte_identity",
++            "patch_size": self.patch_size,
++            "byte_vocab_size": self.byte_vocab_size,
++            "special_tokens": self.special_tokens,
++            "patch_to_id": self.patch_to_id,
++        }
++        with open(path, "w", encoding="utf-8") as f:
++            json.dump(payload, f, indent=2)
++
++    @classmethod
++    def load(cls, path: str | Path) -> "FixedPatchTokenizer":
++        with open(path, "r", encoding="utf-8") as f:
++            payload = json.load(f)
++
++        tok = cls(patch_size=int(payload.get("patch_size", 1)))
++        loaded_vocab = payload.get("patch_to_id")
++        if loaded_vocab:
++            tok.patch_to_id = {k: int(v) for k, v in loaded_vocab.items()}
++            tok.id_to_patch = {v: k for k, v in tok.patch_to_id.items()}
++        return tok
++
++
++ByteIdentityTokenizer = FixedPatchTokenizer
+diff --git a/src/blt_lite/train.py b/src/blt_lite/train.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9717332923961e7b1dad49c2262444c532e8d56d
+--- /dev/null
++++ b/src/blt_lite/train.py
+@@ -0,0 +1,35 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import numpy as np
++import torch
++from torch.utils.data import DataLoader
++
++from .dataset import TokenSequenceDataset
++from .model import TinyPatchLM
++
++
++def build_dataloaders(train_path: Path, val_path: Path, seq_len: int, batch_size: int):
++    train_tokens = np.load(train_path)
++    val_tokens = np.load(val_path)
++    train_ds = TokenSequenceDataset(train_tokens, seq_len)
++    val_ds = TokenSequenceDataset(val_tokens, seq_len)
++    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
++    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
++    return train_dl, val_dl
++
++
++def evaluate(model: TinyPatchLM, val_loader: DataLoader, device: torch.device, max_batches: int | None = None) -> float:
++    model.eval()
++    losses = []
++    with torch.no_grad():
++        for batch_idx, (x, y) in enumerate(val_loader):
++            if max_batches is not None and batch_idx >= max_batches:
++                break
++            x = x.to(device)
++            y = y.to(device)
++            _, loss = model(x, y)
++            losses.append(loss.item())
++    model.train()
++    return float(sum(losses) / max(1, len(losses)))
+diff --git a/src/blt_lite/utils.py b/src/blt_lite/utils.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..186e2edae301f5d5304abd1dae557242bf295de8
+--- /dev/null
++++ b/src/blt_lite/utils.py
+@@ -0,0 +1,31 @@
++from __future__ import annotations
++
++import os
++import random
++from pathlib import Path
++
++import numpy as np
++import torch
++import yaml
++
++
++def load_config(path: str | os.PathLike) -> dict:
++    with open(path, "r", encoding="utf-8") as f:
++        return yaml.safe_load(f)
++
++
++def set_seed(seed: int) -> None:
++    random.seed(seed)
++    np.random.seed(seed)
++    torch.manual_seed(seed)
++    torch.cuda.manual_seed_all(seed)
++
++
++def get_device() -> torch.device:
++    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
++
++
++def ensure_dir(path: str | os.PathLike) -> Path:
++    p = Path(path)
++    p.mkdir(parents=True, exist_ok=True)
++    return p
