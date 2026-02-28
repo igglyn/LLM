@@ -21,14 +21,11 @@ from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
 
 
-def warmup_cosine_lr(step: int, max_steps: int, warmup_steps: int, lr_max: float, lr_min: float) -> float:
+def cosine_lr(step: int, max_steps: int, warmup_steps: int, base_lr: float) -> float:
     if step < warmup_steps:
-        return lr_max * (step + 1) / max(1, warmup_steps)
-
-    decay_total = max(1, max_steps - warmup_steps)
-    decay_step = min(step - warmup_steps, decay_total)
-    cosine = 0.5 * (1 + math.cos(math.pi * decay_step / decay_total))
-    return lr_min + (lr_max - lr_min) * cosine
+        return base_lr * (step + 1) / max(1, warmup_steps)
+    progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+    return 0.5 * base_lr * (1 + math.cos(math.pi * progress))
 
 
 def main():
@@ -61,7 +58,7 @@ def main():
         dropout=float(cfg["model"]["dropout"]),
     ).to(device)
 
-    optimizer = AdamW(model.parameters(), lr=float(tcfg.get("lr_max", 3e-4)), weight_decay=float(tcfg["weight_decay"]))
+    optimizer = AdamW(model.parameters(), lr=float(tcfg["lr"]), weight_decay=float(tcfg["weight_decay"]))
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
     out_dir = ensure_dir(tcfg.get("out_dir", "outputs"))
@@ -70,9 +67,8 @@ def main():
     save_every = int(tcfg.get("save_every", 200))
     grad_accum_steps = int(tcfg.get("grad_accum_steps", 1))
     grad_clip = float(tcfg.get("grad_clip", 1.0))
-    lr_max = float(tcfg.get("lr_max", 3e-4))
-    lr_min = float(tcfg.get("lr_min", 3e-5))
-    warmup_steps = int(tcfg.get("warmup_steps", 1000))
+    warmup_steps = int(tcfg.get("warmup_steps", 100))
+    base_lr = float(tcfg["lr"])
 
     step = 0
     best_val = float("inf")
@@ -80,7 +76,7 @@ def main():
     while step < max_steps:
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
-            lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min)
+            lr = cosine_lr(step, max_steps, warmup_steps, base_lr)
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
