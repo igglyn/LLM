@@ -1,0 +1,24 @@
+
+# pre-commit
+.pre-commit-config.yaml
+
+# pycache
+src/*/__pycache__
+
+# data files
+data/raw/*
+data/processed/*
+
+# outputs
+outputs/*
+
+# Devenv
+.devenv*
+devenv.local.nix
+nix-eval-*
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
