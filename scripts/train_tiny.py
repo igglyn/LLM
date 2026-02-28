@@ -11,6 +11,7 @@ if str(SRC) not in sys.path:
 
 import argparse
 import math
+import re
 
 import torch
 from torch.optim import AdamW
@@ -19,6 +20,9 @@ from blt_lite.model import TinyPatchLM
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
+
+
+_STEP_RE = re.compile(r"step_(\d+)\.pt$")
 
 
 def warmup_cosine_lr(step: int, max_steps: int, warmup_steps: int, lr_max: float, lr_min: float) -> float:
@@ -31,9 +35,21 @@ def warmup_cosine_lr(step: int, max_steps: int, warmup_steps: int, lr_max: float
     return lr_min + (lr_max - lr_min) * cosine
 
 
+def parse_step_from_checkpoint_name(path: Path) -> int:
+    match = _STEP_RE.search(path.name)
+    if not match:
+        raise ValueError(f"Checkpoint filename must match step_<N>.pt; got: {path.name}")
+    return int(match.group(1))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Optional checkpoint filename or path to resume from (expects step_<N>.pt naming).",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -78,6 +94,16 @@ def main():
 
     step = 0
     best_val = float("inf")
+
+    if args.checkpoint:
+        ckpt_path = Path(args.checkpoint)
+        if not ckpt_path.is_absolute() and not ckpt_path.exists():
+            ckpt_path = out_dir / ckpt_path
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        step = parse_step_from_checkpoint_name(ckpt_path)
+        print(f"Resumed from checkpoint {ckpt_path} at step={step}")
+
     model.train()
     while step < max_steps:
         for x, y in train_loader:
