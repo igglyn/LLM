@@ -1,5 +1,5 @@
 tokenizer:
-  patch_size: 1
+  patch_size: 8
   add_bos: true
   add_eos: true
 
@@ -21,8 +21,8 @@ train:
   batch_size: 8
   grad_accum_steps: 4
   max_steps: 15000
-  eval_every: 100
-  save_every: 200
+  eval_every: 14000
+  save_every: 1000
   lr_max: 0.0003
   lr_min: 0.00003
   warmup_steps: 1000
@@ -31,6 +31,6 @@ train:
   out_dir: outputs
 
 sample:
-  temperature: 0.9
-  top_k: 40
+  temperature: 0.7
+  top_k: 20
   max_new_tokens: 128
