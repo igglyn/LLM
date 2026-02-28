@@ -1,6 +1,6 @@
 # BLT Lite
 
-A small local playground for byte-identity tokenization and a tiny byte-level language model.
+A small local playground for fixed-byte patch tokenization and a tiny patch-level language model.
 
 ## Quickstart
 
@@ -32,7 +32,5 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 
 ## Notes
 
-- Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens, and configurable `tokenizer.patch_size` chunking.
-- Latent model path is patch-based internally: token embeddings are patchified, processed in latent patch space, then unpatchified back to token logits.
-- Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
+- Tokenization is fixed-length patches over UTF-8 bytes.
 - Prioritizes tokenizer coherence and minimal code over model quality.

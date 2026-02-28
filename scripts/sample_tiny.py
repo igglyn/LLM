@@ -37,7 +37,6 @@ def main():
     model = TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
         seq_len=int(cfg["data"]["seq_len"]),
-        patch_size=int(getattr(tokenizer, "patch_size", cfg.get("tokenizer", {}).get("patch_size", 1))),
         d_model=int(cfg["model"]["d_model"]),
         n_layers=int(cfg["model"]["n_layers"]),
         n_heads=int(cfg["model"]["n_heads"]),

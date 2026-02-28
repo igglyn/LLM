@@ -1,6 +1,6 @@
 """BLT Lite package."""
 
-from .tokenizer import ByteIdentityTokenizer, FixedPatchTokenizer
+from .tokenizer import FixedPatchTokenizer
 from .model import TinyPatchLM
 
-__all__ = ["FixedPatchTokenizer", "ByteIdentityTokenizer", "TinyPatchLM"]
+__all__ = ["FixedPatchTokenizer", "TinyPatchLM"]
