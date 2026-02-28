@@ -33,6 +33,6 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 ## Notes
 
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens, and configurable `tokenizer.patch_size` chunking.
-- Latent model path is patch-based internally: token embeddings are patchified, processed in latent patch space, then unpatchified back to token logits.
+- Model uses isolated patch encoder/decoder modules: the patch encoder projects grouped multi-byte token windows, processes them causally, then the patch decoder cross-attends those states into token states before the main causal transformer.
 - Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
 - Prioritizes tokenizer coherence and minimal code over model quality.
