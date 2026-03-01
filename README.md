@@ -24,7 +24,7 @@ python scripts/prepare_data.py --config configs/tiny.yaml
 python scripts/train_tiny.py --config configs/tiny.yaml
 ```
 
-Resume training from a checkpoint named like `step_<N>.pt`:
+Resume training from a checkpoint named like `step_<N>.pt` (also accepts `best.pt` / `last.pt`):
 
 ```bash
 python scripts/train_tiny.py --config configs/tiny.yaml --checkpoint outputs/step_200.pt
