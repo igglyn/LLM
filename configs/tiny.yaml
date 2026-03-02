@@ -16,6 +16,26 @@ model:
   n_heads: 6
   dropout: 0.1
 
+patcher:
+  latent_dim: 384
+  encoder_layers: 2
+  decoder_layers: 2
+  n_heads: 6
+  dropout: 0.1
+  pretrained_path: ""
+  freeze: false
+
+patcher_train:
+  batch_size: 8
+  max_steps: 3000
+  eval_every: 100
+  eval_batches: 50
+  save_every: 200
+  lr: 0.0003
+  weight_decay: 0.01
+  grad_clip: 1.0
+  out_dir: outputs/patcher
+
 train:
   seed: 42
   batch_size: 8
