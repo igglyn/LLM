@@ -67,9 +67,11 @@ def main():
     token_ids = tokenizer.encode(args.prompt, add_bos=True, add_eos=False)
     idx = torch.tensor([token_ids], dtype=torch.long, device=device)
 
+    patch_size = int(getattr(tokenizer, "patch_size", cfg.get("tokenizer", {}).get("patch_size", 1)))
+    max_new_patches = int(cfg["sample"]["max_new_patches"])
     out = model.generate(
         idx,
-        max_new_tokens=int(cfg["sample"]["max_new_tokens"]),
+        max_new_tokens=max_new_patches * patch_size,
         temperature=float(cfg["sample"]["temperature"]),
         top_k=int(cfg["sample"]["top_k"]),
     )

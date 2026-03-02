@@ -14,12 +14,12 @@ import math
 import re
 
 import torch
-from torch.optim import AdamW
 
 from blt_lite.model import TinyPatchLM
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
+from blt_lite.optim import AdEMAMix
 
 
 _STEP_RE = re.compile(r"step_(\d+)\.pt$")
@@ -128,7 +128,11 @@ def main():
         model.load_state_dict(resume_ckpt["model"])
         print(f"Resumed from checkpoint {ckpt_path} at step={step}")
 
-    optimizer = AdamW(model.parameters(), lr=float(tcfg.get("lr_max", 3e-4)), weight_decay=float(tcfg["weight_decay"]))
+    optimizer = AdEMAMix(
+        model.parameters(),
+        lr=float(tcfg.get("lr_max", 3e-4)),
+        weight_decay=float(tcfg["weight_decay"]),
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
     max_steps = int(tcfg["max_steps"])

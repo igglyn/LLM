@@ -54,4 +54,4 @@ train:
 sample:
   temperature: 0.9
   top_k: 40
-  max_new_tokens: 128
+  max_new_patches: 128

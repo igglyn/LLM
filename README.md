@@ -36,7 +36,7 @@ Resume training from a checkpoint named like `step_<N>.pt` (also accepts `best.p
 python scripts/train_tiny.py --config configs/tiny.yaml --checkpoint outputs/step_200.pt
 ```
 
-6. Sample:
+6. Sample (`sample.max_new_patches` controls generation horizon in patch units):
 
 ```bash
 python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
@@ -46,6 +46,6 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens, and configurable `tokenizer.patch_size` chunking.
 - Patcher and unpatcher are fully isolated in `PatcherAutoencoder` (`PatchEncoder` + `PatchDecoder`). They can be pretrained first with reconstruction loss and then plugged into `TinyPatchLM`.
-- Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config.
+- Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both patcher pretraining and LM training use AdEMAMix.
 - Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
 - Prioritizes tokenizer coherence and minimal code over model quality.

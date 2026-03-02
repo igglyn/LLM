@@ -12,12 +12,12 @@ if str(SRC) not in sys.path:
 import argparse
 
 import torch
-from torch.optim import AdamW
 
 from blt_lite.model import PatcherAutoencoder
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
+from blt_lite.optim import AdEMAMix
 
 
 def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
@@ -64,7 +64,7 @@ def main():
 
     token_emb, patcher = build_patcher_and_embed(cfg, tokenizer, device)
     params = list(token_emb.parameters()) + list(patcher.parameters())
-    optimizer = AdamW(
+    optimizer = AdEMAMix(
         params,
         lr=float(patcher_train.get("lr", 3e-4)),
         weight_decay=float(patcher_train.get("weight_decay", 0.01)),
