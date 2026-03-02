@@ -21,6 +21,7 @@ from blt_lite.utils import get_device, load_config
 def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device) -> TinyPatchLM:
     model_cfg = cfg["model"]
     data_cfg = cfg["data"]
+    patcher_cfg = cfg.get("patcher", {})
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
         seq_len=int(data_cfg["seq_len"]),
@@ -29,6 +30,11 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         n_layers=int(model_cfg["n_layers"]),
         n_heads=int(model_cfg["n_heads"]),
         dropout=float(model_cfg["dropout"]),
+        patcher_latent_dim=int(patcher_cfg.get("latent_dim", model_cfg["d_model"])),
+        patcher_encoder_layers=int(patcher_cfg.get("encoder_layers", 2)),
+        patcher_decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
+        patcher_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
+        patcher_dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
     ).to(device)
 
 

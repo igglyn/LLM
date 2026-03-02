@@ -54,6 +54,7 @@ def _resolve_checkpoint_path(raw_path: str, out_dir: Path) -> Path:
 def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device) -> TinyPatchLM:
     model_cfg = cfg["model"]
     data_cfg = cfg["data"]
+    patcher_cfg = cfg.get("patcher", {})
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
         seq_len=int(data_cfg["seq_len"]),
@@ -62,7 +63,26 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         n_layers=int(model_cfg["n_layers"]),
         n_heads=int(model_cfg["n_heads"]),
         dropout=float(model_cfg["dropout"]),
+        patcher_latent_dim=int(patcher_cfg.get("latent_dim", model_cfg["d_model"])),
+        patcher_encoder_layers=int(patcher_cfg.get("encoder_layers", 2)),
+        patcher_decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
+        patcher_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
+        patcher_dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
     ).to(device)
+
+
+
+
+def _maybe_load_pretrained_patcher(model: TinyPatchLM, cfg: dict, device: torch.device) -> None:
+    patcher_cfg = cfg.get("patcher", {})
+    path = patcher_cfg.get("pretrained_path", "")
+    if path:
+        model.load_patcher_checkpoint(path, map_location=device)
+        print(f"Loaded pretrained patcher from {path}")
+    if bool(patcher_cfg.get("freeze", False)):
+        for p in model.patcher.parameters():
+            p.requires_grad = False
+        print("Froze patcher parameters")
 
 
 def main():
@@ -103,6 +123,7 @@ def main():
     )
 
     model = _build_model_from_cfg(cfg, tokenizer, device)
+    _maybe_load_pretrained_patcher(model, cfg, device)
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model"])
         print(f"Resumed from checkpoint {ckpt_path} at step={step}")
