@@ -19,7 +19,7 @@ from blt_lite.model import TinyPatchLM
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
-from blt_lite.optim import AdEMAMix
+from torch.optim import AdamW
 
 
 _STEP_RE = re.compile(r"step_(\d+)\.pt$")
@@ -128,7 +128,7 @@ def main():
         model.load_state_dict(resume_ckpt["model"])
         print(f"Resumed from checkpoint {ckpt_path} at step={step}")
 
-    optimizer = AdEMAMix(
+    optimizer = AdamW(
         model.parameters(),
         lr=float(tcfg.get("lr_max", 3e-4)),
         weight_decay=float(tcfg["weight_decay"]),
