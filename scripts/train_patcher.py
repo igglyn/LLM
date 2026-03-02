@@ -17,7 +17,7 @@ from blt_lite.model import PatcherAutoencoder
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
-from blt_lite.optim import AdEMAMix
+from torch.optim import AdamW
 
 
 def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
@@ -42,7 +42,7 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
     return emb, patcher
 
 
-def maybe_reduce_lr_by_threshold(optimizer: AdEMAMix, val_loss: float, patcher_train: dict, reduced_once: bool) -> bool:
+def maybe_reduce_lr_by_threshold(optimizer, val_loss: float, patcher_train: dict, reduced_once: bool) -> bool:
     threshold = patcher_train.get("lr_reduce_threshold")
     if threshold is None or reduced_once:
         return reduced_once
@@ -80,7 +80,7 @@ def main():
 
     token_emb, patcher = build_patcher_and_embed(cfg, tokenizer, device)
     params = list(token_emb.parameters()) + list(patcher.parameters())
-    optimizer = AdEMAMix(
+    optimizer = AdamW(
         params,
         lr=float(patcher_train.get("lr", 3e-4)),
         weight_decay=float(patcher_train.get("weight_decay", 0.01)),
