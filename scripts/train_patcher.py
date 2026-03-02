@@ -42,6 +42,22 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
     return emb, patcher
 
 
+def maybe_reduce_lr_by_threshold(optimizer: AdEMAMix, val_loss: float, patcher_train: dict, reduced_once: bool) -> bool:
+    threshold = patcher_train.get("lr_reduce_threshold")
+    if threshold is None or reduced_once:
+        return reduced_once
+    if val_loss > float(threshold):
+        return reduced_once
+
+    factor = float(patcher_train.get("lr_reduce_factor", 0.5))
+    lr_min = float(patcher_train.get("lr_min", 1e-6))
+    for group in optimizer.param_groups:
+        old_lr = float(group["lr"])
+        group["lr"] = max(lr_min, old_lr * factor)
+        print(f"Reduced patcher LR due to threshold: {old_lr:.8f} -> {group['lr']:.8f}")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -82,6 +98,7 @@ def main():
 
     best_val = float("inf")
     step = 0
+    lr_reduced_by_threshold = False
     patcher.train()
     token_emb.train()
     while step < max_steps:
@@ -113,6 +130,12 @@ def main():
                         {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
                         out_dir / "best.pt",
                     )
+                lr_reduced_by_threshold = maybe_reduce_lr_by_threshold(
+                    optimizer,
+                    val_loss,
+                    patcher_train,
+                    lr_reduced_by_threshold,
+                )
                 patcher.train(); token_emb.train()
 
             if step % save_every == 0 and step > 0:
