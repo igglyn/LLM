@@ -86,8 +86,8 @@ def main():
         lr=float(patcher_train.get("lr", 3e-4)),
         weight_decay=float(patcher_train.get("weight_decay", 0.01)),
     )
-    patcher_amp_enabled = bool(patcher_train.get("amp_enabled", cfg.get("amp", {}).get("enabled", True)))
-    patcher_amp_dtype = torch.float16 if str(patcher_train.get("amp_dtype", cfg.get("amp", {}).get("dtype", "float16"))) == "float16" else torch.bfloat16
+    patcher_amp_enabled = bool(patcher_train.get("amp_enabled", cfg.get("train", {}).get("amp_enabled", True)))
+    patcher_amp_dtype = torch.float16 if str(patcher_train.get("amp_dtype", cfg.get("train", {}).get("amp_dtype", "float16"))) == "float16" else torch.bfloat16
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and patcher_amp_enabled))
 
     out_dir = ensure_dir(patcher_train.get("out_dir", "outputs/patcher"))

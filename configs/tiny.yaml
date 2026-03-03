@@ -56,6 +56,8 @@ train:
   warmup_steps: 1000
   weight_decay: 0.1
   grad_clip: 1.0
+  amp_enabled: true
+  amp_dtype: float16
   out_dir: outputs
 
 sample:
@@ -63,6 +65,3 @@ sample:
   top_k: 40
   max_new_patches: 128
 
-amp:
-  enabled: true
-  dtype: float16
