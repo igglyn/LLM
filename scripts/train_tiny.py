@@ -68,6 +68,8 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher_decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
         patcher_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         patcher_dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
+        use_amp=bool(cfg.get("amp", {}).get("enabled", True)),
+        amp_dtype=str(cfg.get("amp", {}).get("dtype", "float16")),
     ).to(device)
 
 

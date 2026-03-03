@@ -47,5 +47,6 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens, and configurable `tokenizer.patch_size` chunking.
 - Patcher and unpatcher are fully isolated in `PatcherAutoencoder` (`PatchEncoder` + `PatchDecoder`). They can be pretrained first with reconstruction loss and then plugged into `TinyPatchLM`.
 - Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both LM training and patcher pretraining use AdamW; patcher pretraining can reduce LR automatically once `patcher_train.lr_reduce_threshold` is reached.
+- Main model AMP behavior is configurable under `amp` (`enabled`, `dtype`) and is applied inside `TinyPatchLM` forward for CUDA runs.
 - Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
 - Prioritizes tokenizer coherence and minimal code over model quality.

@@ -58,3 +58,7 @@ sample:
   temperature: 0.9
   top_k: 40
   max_new_patches: 128
+
+amp:
+  enabled: true
+  dtype: float16

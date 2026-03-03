@@ -153,11 +153,15 @@ class TinyPatchLM(nn.Module):
         patcher_decoder_layers: int = 2,
         patcher_heads: int | None = None,
         patcher_dropout: float | None = None,
+        use_amp: bool = True,
+        amp_dtype: str = "float16",
     ):
         super().__init__()
         if patch_size <= 0:
             raise ValueError("patch_size must be > 0")
         self.seq_len = seq_len
+        self.use_amp = use_amp
+        self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
 
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.token_pos_emb = nn.Embedding(seq_len, d_model)
@@ -198,15 +202,17 @@ class TinyPatchLM(nn.Module):
         if token_t > self.seq_len:
             raise ValueError(f"sequence length {token_t} exceeds model limit {self.seq_len}")
 
-        token_hidden = self.token_emb(x)
-        pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
-        token_hidden = token_hidden + self.token_pos_emb(pos)
+        amp_enabled = self.use_amp and (x.device.type == "cuda")
+        with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=self.amp_dtype):
+            token_hidden = self.token_emb(x)
+            pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
+            token_hidden = token_hidden + self.token_pos_emb(pos)
 
-        patch_fused, _ = self.patcher(token_hidden)
-        token_hidden = self.blocks(patch_fused, mask=_causal_mask(token_t, token_t, x.device))
+            patch_fused, _ = self.patcher(token_hidden)
+            token_hidden = self.blocks(patch_fused, mask=_causal_mask(token_t, token_t, x.device))
 
-        token_hidden = self.ln_f(token_hidden)
-        logits = self.lm_head(token_hidden)
+            token_hidden = self.ln_f(token_hidden)
+            logits = self.lm_head(token_hidden)
 
         loss = None
         if targets is not None:
