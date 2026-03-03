@@ -85,7 +85,9 @@ def main():
         lr=float(patcher_train.get("lr", 3e-4)),
         weight_decay=float(patcher_train.get("weight_decay", 0.01)),
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    patcher_amp_enabled = bool(patcher_train.get("amp_enabled", cfg.get("amp", {}).get("enabled", True)))
+    patcher_amp_dtype = torch.float16 if str(patcher_train.get("amp_dtype", cfg.get("amp", {}).get("dtype", "float16"))) == "float16" else torch.bfloat16
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and patcher_amp_enabled))
 
     out_dir = ensure_dir(patcher_train.get("out_dir", "outputs/patcher"))
     max_steps = int(patcher_train.get("max_steps", 3000))
@@ -107,7 +109,7 @@ def main():
             x = x.to(device)
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda"), dtype=torch.float16):
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and patcher_amp_enabled), dtype=patcher_amp_dtype):
                 loss = batch_loss(x)
 
             scaler.scale(loss).backward()
@@ -125,7 +127,7 @@ def main():
                 with torch.no_grad():
                     for vx, _ in val_loader:
                         vx = vx.to(device)
-                        with torch.cuda.amp.autocast(enabled=(device.type == "cuda"), dtype=torch.float16):
+                        with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and patcher_amp_enabled), dtype=patcher_amp_dtype):
                             losses.append(batch_loss(vx).item())
                         if len(losses) >= int(patcher_train.get("eval_batches", 50)):
                             break

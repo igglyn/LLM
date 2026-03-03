@@ -48,5 +48,7 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Patcher and unpatcher are fully isolated in `PatcherAutoencoder` (`PatchEncoder` + `PatchDecoder`). They can be pretrained first with reconstruction loss and then plugged into `TinyPatchLM`.
 - Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both LM training and patcher pretraining use AdamW; patcher pretraining can reduce LR automatically once `patcher_train.lr_reduce_threshold` is reached.
 - Main model AMP behavior is configurable under `amp` (`enabled`, `dtype`) and is applied inside `TinyPatchLM` forward for CUDA runs.
+- Patcher AMP is independently configurable via `patcher_train.amp_enabled` and `patcher_train.amp_dtype`.
+- Positional encoding mode is configurable with `model.pos_encoding: `learned | rope`; RoPE rotates attention Q/K only and uses precomputed cos/sin caches up to max sequence length.
 - Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
 - Prioritizes tokenizer coherence and minimal code over model quality.

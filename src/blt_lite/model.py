@@ -13,6 +13,84 @@ def _causal_mask(q_len: int, k_len: int, device: torch.device) -> torch.Tensor:
     return torch.triu(mask, diagonal=1)
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.size(-1) // 2]
+    x2 = x[..., x.size(-1) // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    q = (q * cos) + (_rotate_half(q) * sin)
+    k = (k * cos) + (_rotate_half(k) * sin)
+    return q, k
+
+
+def _build_rope_cache(max_seq_len: int, head_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if head_dim % 2 != 0:
+        raise ValueError("RoPE requires even head dimension")
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    positions = torch.arange(max_seq_len).float()
+    freqs = torch.outer(positions, inv_freq)
+    emb = torch.cat([freqs, freqs], dim=-1)
+    cos = emb.cos().unsqueeze(0).unsqueeze(0)
+    sin = emb.sin().unsqueeze(0).unsqueeze(0)
+    return cos, sin
+
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float):
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.attn_dropout = dropout
+        self.resid_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None) -> torch.Tensor:
+        bsz, t, d = x.shape
+        qkv = self.qkv(x).view(bsz, t, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        if rope_cos is not None and rope_sin is not None:
+            cos = rope_cos[:, :, :t, :].to(device=x.device, dtype=q.dtype)
+            sin = rope_sin[:, :, :t, :].to(device=x.device, dtype=q.dtype)
+            q, k = _apply_rope(q, k, cos, sin)
+
+        attn = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+            is_causal=True,
+        )
+        attn = attn.transpose(1, 2).contiguous().view(bsz, t, d)
+        return self.resid_dropout(self.out_proj(attn))
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(d_model)
+        self.attn = CausalSelfAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
+        self.ln_2 = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 4, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x), rope_cos=rope_cos, rope_sin=rope_sin)
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+
 class PatchEncoder(nn.Module):
     def __init__(self, in_dim: int, d_model: int, n_heads: int, n_layers: int, dropout: float, patch_size: int, seq_len: int):
         super().__init__()
@@ -155,6 +233,7 @@ class TinyPatchLM(nn.Module):
         patcher_dropout: float | None = None,
         use_amp: bool = True,
         amp_dtype: str = "float16",
+        pos_encoding: str = "learned",
     ):
         super().__init__()
         if patch_size <= 0:
@@ -162,9 +241,12 @@ class TinyPatchLM(nn.Module):
         self.seq_len = seq_len
         self.use_amp = use_amp
         self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
+        if pos_encoding not in {"learned", "rope"}:
+            raise ValueError("pos_encoding must be one of: learned, rope")
+        self.pos_encoding = pos_encoding
 
         self.token_emb = nn.Embedding(vocab_size, d_model)
-        self.token_pos_emb = nn.Embedding(seq_len, d_model)
+        self.token_pos_emb = nn.Embedding(seq_len, d_model) if pos_encoding == "learned" else None
 
         self.patcher = PatcherAutoencoder(
             in_dim=d_model,
@@ -178,19 +260,19 @@ class TinyPatchLM(nn.Module):
             dropout=float(dropout if patcher_dropout is None else patcher_dropout),
         )
 
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.blocks = nn.TransformerEncoder(layer, num_layers=n_layers)
+        self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(n_layers)])
         self.ln_f = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight
+
+        if self.pos_encoding == "rope":
+            head_dim = d_model // n_heads
+            cos, sin = _build_rope_cache(seq_len, head_dim)
+            self.register_buffer("rope_cos_cached", cos, persistent=False)
+            self.register_buffer("rope_sin_cached", sin, persistent=False)
+        else:
+            self.register_buffer("rope_cos_cached", None, persistent=False)
+            self.register_buffer("rope_sin_cached", None, persistent=False)
 
     def load_patcher_checkpoint(self, path: str | Path, map_location: torch.device | str | None = None) -> None:
         ckpt = torch.load(Path(path), map_location=map_location)
@@ -205,11 +287,17 @@ class TinyPatchLM(nn.Module):
         amp_enabled = self.use_amp and (x.device.type == "cuda")
         with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=self.amp_dtype):
             token_hidden = self.token_emb(x)
-            pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
-            token_hidden = token_hidden + self.token_pos_emb(pos)
+            if self.token_pos_emb is not None:
+                pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
+                token_hidden = token_hidden + self.token_pos_emb(pos)
 
             patch_fused, _ = self.patcher(token_hidden)
-            token_hidden = self.blocks(patch_fused, mask=_causal_mask(token_t, token_t, x.device))
+
+            rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
+            rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
+            token_hidden = patch_fused
+            for block in self.blocks:
+                token_hidden = block(token_hidden, rope_cos=rope_cos, rope_sin=rope_sin)
 
             token_hidden = self.ln_f(token_hidden)
             logits = self.lm_head(token_hidden)
