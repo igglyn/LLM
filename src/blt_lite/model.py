@@ -275,6 +275,7 @@ class TinyPatchLM(nn.Module):
         use_amp: bool = True,
         amp_dtype: str = "float16",
         pos_encoding: str = "learned",
+        patcher_pos_encoding: str = "learned",
     ):
         super().__init__()
         if patch_size <= 0:
