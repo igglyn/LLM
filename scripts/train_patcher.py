@@ -85,6 +85,7 @@ def main():
         lr=float(patcher_train.get("lr", 3e-4)),
         weight_decay=float(patcher_train.get("weight_decay", 0.01)),
     )
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
     out_dir = ensure_dir(patcher_train.get("out_dir", "outputs/patcher"))
     max_steps = int(patcher_train.get("max_steps", 3000))
@@ -104,11 +105,16 @@ def main():
     while step < max_steps:
         for x, _ in train_loader:
             x = x.to(device)
-            loss = batch_loss(x)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda"), dtype=torch.float16):
+                loss = batch_loss(x)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(params, float(patcher_train.get("grad_clip", 1.0)))
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             if step % 20 == 0:
                 print(f"patcher_step={step} recon_loss={loss.item():.6f}")
@@ -119,7 +125,8 @@ def main():
                 with torch.no_grad():
                     for vx, _ in val_loader:
                         vx = vx.to(device)
-                        losses.append(batch_loss(vx).item())
+                        with torch.cuda.amp.autocast(enabled=(device.type == "cuda"), dtype=torch.float16):
+                            losses.append(batch_loss(vx).item())
                         if len(losses) >= int(patcher_train.get("eval_batches", 50)):
                             break
                 val_loss = float(sum(losses) / max(1, len(losses)))
