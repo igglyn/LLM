@@ -38,6 +38,7 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
         decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
         n_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
+        pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
     ).to(device)
     return emb, patcher
 

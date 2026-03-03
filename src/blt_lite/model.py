@@ -92,23 +92,34 @@ class TransformerBlock(nn.Module):
 
 
 class PatchEncoder(nn.Module):
-    def __init__(self, in_dim: int, d_model: int, n_heads: int, n_layers: int, dropout: float, patch_size: int, seq_len: int):
+    def __init__(
+        self,
+        in_dim: int,
+        d_model: int,
+        n_heads: int,
+        n_layers: int,
+        dropout: float,
+        patch_size: int,
+        seq_len: int,
+        pos_encoding: str = "learned",
+    ):
         super().__init__()
         self.patch_size = patch_size
         self.max_patch_len = math.ceil(seq_len / patch_size)
         self.patch_proj = nn.Linear(in_dim * patch_size, d_model)
-        self.patch_pos_emb = nn.Embedding(self.max_patch_len, d_model)
-
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.blocks = nn.TransformerEncoder(layer, num_layers=max(1, n_layers))
+        if pos_encoding not in {"learned", "rope"}:
+            raise ValueError("patcher pos_encoding must be one of: learned, rope")
+        self.pos_encoding = pos_encoding
+        self.patch_pos_emb = nn.Embedding(self.max_patch_len, d_model) if pos_encoding == "learned" else None
+        self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
+        if self.pos_encoding == "rope":
+            head_dim = d_model // n_heads
+            cos, sin = _build_rope_cache(self.max_patch_len, head_dim)
+            self.register_buffer("rope_cos_cached", cos, persistent=False)
+            self.register_buffer("rope_sin_cached", sin, persistent=False)
+        else:
+            self.register_buffer("rope_cos_cached", None, persistent=False)
+            self.register_buffer("rope_sin_cached", None, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bsz, token_t, d_model = x.shape
@@ -121,18 +132,38 @@ class PatchEncoder(nn.Module):
         grouped = x.view(bsz, patch_t, self.patch_size, d_model)
         patch_hidden = self.patch_proj(grouped.reshape(bsz, patch_t, self.patch_size * d_model))
 
-        pos = torch.arange(0, patch_t, device=x.device).unsqueeze(0)
-        patch_hidden = patch_hidden + self.patch_pos_emb(pos)
+        if self.patch_pos_emb is not None:
+            pos = torch.arange(0, patch_t, device=x.device).unsqueeze(0)
+            patch_hidden = patch_hidden + self.patch_pos_emb(pos)
 
-        mask = _causal_mask(patch_t, patch_t, x.device)
-        return self.blocks(patch_hidden, mask=mask)
+        rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
+        rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
+        out = patch_hidden
+        for block in self.blocks:
+            out = block(out, rope_cos=rope_cos, rope_sin=rope_sin)
+        return out
 
 
 class PatchDecoder(nn.Module):
-    def __init__(self, token_dim: int, d_model: int, out_dim: int, n_heads: int, n_layers: int, dropout: float, patch_size: int):
+    def __init__(
+        self,
+        token_dim: int,
+        d_model: int,
+        out_dim: int,
+        n_heads: int,
+        n_layers: int,
+        dropout: float,
+        patch_size: int,
+        seq_len: int,
+        pos_encoding: str = "learned",
+    ):
         super().__init__()
         self.patch_size = patch_size
         self.query_proj = nn.Linear(token_dim, d_model)
+        if pos_encoding not in {"learned", "rope"}:
+            raise ValueError("patcher pos_encoding must be one of: learned, rope")
+        self.pos_encoding = pos_encoding
+        self.token_pos_emb = nn.Embedding(seq_len, d_model) if pos_encoding == "learned" else None
 
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=d_model,
@@ -140,17 +171,16 @@ class PatchDecoder(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.blocks = nn.TransformerEncoder(layer, num_layers=max(1, n_layers))
+        self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
         self.out_proj = nn.Linear(d_model, out_dim)
+        if self.pos_encoding == "rope":
+            head_dim = d_model // n_heads
+            cos, sin = _build_rope_cache(seq_len, head_dim)
+            self.register_buffer("rope_cos_cached", cos, persistent=False)
+            self.register_buffer("rope_sin_cached", sin, persistent=False)
+        else:
+            self.register_buffer("rope_cos_cached", None, persistent=False)
+            self.register_buffer("rope_sin_cached", None, persistent=False)
 
     def _token_to_patch_mask(self, token_len: int, patch_len: int, device: torch.device) -> torch.Tensor:
         token_positions = torch.arange(token_len, device=device)
@@ -171,7 +201,14 @@ class PatchDecoder(nn.Module):
             attn_mask=token_patch_mask,
             need_weights=False,
         )
-        dec_hidden = self.blocks(query_hidden + cross_hidden, mask=_causal_mask(token_t, token_t, token_hidden.device))
+        dec_hidden = query_hidden + cross_hidden
+        if self.token_pos_emb is not None:
+            pos = torch.arange(0, token_t, device=token_hidden.device).unsqueeze(0)
+            dec_hidden = dec_hidden + self.token_pos_emb(pos)
+        rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
+        rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
+        for block in self.blocks:
+            dec_hidden = block(dec_hidden, rope_cos=rope_cos, rope_sin=rope_sin)
         return self.out_proj(dec_hidden)
 
 
@@ -189,6 +226,7 @@ class PatcherAutoencoder(nn.Module):
         decoder_layers: int,
         n_heads: int,
         dropout: float,
+        pos_encoding: str = "learned",
     ):
         super().__init__()
         self.encoder = PatchEncoder(
@@ -199,6 +237,7 @@ class PatcherAutoencoder(nn.Module):
             dropout=dropout,
             patch_size=patch_size,
             seq_len=seq_len,
+            pos_encoding=pos_encoding,
         )
         self.decoder = PatchDecoder(
             token_dim=in_dim,
@@ -208,6 +247,8 @@ class PatcherAutoencoder(nn.Module):
             n_layers=decoder_layers,
             dropout=dropout,
             patch_size=patch_size,
+            seq_len=seq_len,
+            pos_encoding=pos_encoding,
         )
 
     def forward(self, token_hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -258,6 +299,7 @@ class TinyPatchLM(nn.Module):
             decoder_layers=patcher_decoder_layers,
             n_heads=int(patcher_heads or n_heads),
             dropout=float(dropout if patcher_dropout is None else patcher_dropout),
+            pos_encoding=patcher_pos_encoding,
         )
 
         self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(n_layers)])

@@ -71,6 +71,7 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         use_amp=bool(cfg.get("amp", {}).get("enabled", True)),
         amp_dtype=str(cfg.get("amp", {}).get("dtype", "float16")),
         pos_encoding=str(model_cfg.get("pos_encoding", "learned")),
+        patcher_pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
     ).to(device)
 
 

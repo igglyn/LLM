@@ -50,5 +50,6 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Main model AMP behavior is configurable under `amp` (`enabled`, `dtype`) and is applied inside `TinyPatchLM` forward for CUDA runs.
 - Patcher AMP is independently configurable via `patcher_train.amp_enabled` and `patcher_train.amp_dtype`.
 - Positional encoding mode is configurable with `model.pos_encoding: `learned | rope`; RoPE rotates attention Q/K only and uses precomputed cos/sin caches up to max sequence length.
+- Patcher positional encoding is also configurable via `patcher.pos_encoding: learned | rope`, applying the same Q/K-only RoPE option in patch encoder/decoder self-attention.
 - Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
 - Prioritizes tokenizer coherence and minimal code over model quality.

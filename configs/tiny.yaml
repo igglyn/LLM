@@ -19,6 +19,7 @@ model:
 
 patcher:
   latent_dim: 384
+  pos_encoding: learned
   encoder_layers: 2
   decoder_layers: 2
   n_heads: 6
