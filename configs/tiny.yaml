@@ -61,6 +61,11 @@ patcher2_train:
   lr: 0.0003
   weight_decay: 0.01
   grad_clip: 1.0
+  lr_reduce_threshold: 0.05
+  lr_reduce_factor: 0.5
+  lr_reduce_threshold_2: 0.03
+  lr_reduce_factor_2: 0.5
+  lr_min: 0.000001
   out_dir: outputs/patcher2
   amp_enabled: true
   amp_dtype: float16

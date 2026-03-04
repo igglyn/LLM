@@ -71,6 +71,29 @@ def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
     return p2
 
 
+
+
+def maybe_reduce_lr_by_thresholds(optimizer, val_loss: float, train_cfg: dict, reduction_state: dict) -> dict:
+    thresholds = [
+        ("lr_reduce_threshold", "lr_reduce_factor"),
+        ("lr_reduce_threshold_2", "lr_reduce_factor_2"),
+    ]
+    lr_min = float(train_cfg.get("lr_min", 1e-6))
+    for idx, (thr_key, fac_key) in enumerate(thresholds):
+        if reduction_state.get(idx, False):
+            continue
+        threshold = train_cfg.get(thr_key)
+        if threshold is None or val_loss > float(threshold):
+            continue
+
+        factor = float(train_cfg.get(fac_key, train_cfg.get("lr_reduce_factor", 0.5)))
+        for group in optimizer.param_groups:
+            old_lr = float(group["lr"])
+            group["lr"] = max(lr_min, old_lr * factor)
+            print(f"Reduced patcher2 LR via {thr_key}: {old_lr:.8f} -> {group['lr']:.8f}")
+        reduction_state[idx] = True
+    return reduction_state
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -128,6 +151,7 @@ def main():
 
     best_val = float("inf")
     step = 0
+    lr_reduction_state: dict[int, bool] = {}
     patcher2.train()
     while step < max_steps:
         for h, _ in train_loader:
@@ -159,6 +183,7 @@ def main():
                 if val_loss < best_val:
                     best_val = val_loss
                     torch.save({"patcher2": patcher2.state_dict(), "config": cfg}, out_dir / "best.pt")
+                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, val_loss, p2train, lr_reduction_state)
                 patcher2.train()
 
             if step % save_every == 0 and step > 0:
