@@ -12,25 +12,37 @@ pip install -r requirements.txt
 
 2. Add one or more `.txt` files to `data/raw/`.
 
-3. Prepare tokenizer + encoded dataset:
+3. Prepare explicit stage-1 patcher data (raw text -> token IDs):
 
 ```bash
 python scripts/prepare_data.py --config configs/tiny.yaml
 ```
 
-4. Pretrain first patcher/unpatcher (tokens -> patches):
+4. Prepare explicit stage-2 patcher data artifacts:
+
+```bash
+python scripts/prepare_data_patcher2.py --config configs/tiny.yaml
+```
+
+5. Prepare explicit TinyPatchLM data artifacts:
+
+```bash
+python scripts/prepare_data_tiny.py --config configs/tiny.yaml
+```
+
+6. Pretrain first patcher/unpatcher (tokens -> patches):
 
 ```bash
 python scripts/train_patcher.py --config configs/tiny.yaml
 ```
 
-5. Pretrain second stacked patcher (patches -> larger patches):
+7. Pretrain second stacked patcher (patches -> larger patches):
 
 ```bash
 python scripts/train_patcher2.py --config configs/tiny.yaml
 ```
 
-6. Train tiny LM (optionally loading/freezeing pretrained patcher from config):
+8. Train tiny LM (optionally loading/freezeing pretrained patcher from config):
 
 ```bash
 python scripts/train_tiny.py --config configs/tiny.yaml
@@ -42,7 +54,7 @@ Resume training from a checkpoint named like `step_<N>.pt` (also accepts `best.p
 python scripts/train_tiny.py --config configs/tiny.yaml --checkpoint outputs/step_200.pt
 ```
 
-7. Sample (`sample.max_new_patches` controls generation horizon in large-patch units):
+9. Sample (`sample.max_new_patches` controls generation horizon in large-patch units):
 
 ```bash
 python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
@@ -53,6 +65,7 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens. Data preparation is patch-agnostic; patching happens inside model/patcher modules.
 - Patcher and unpatcher are fully isolated in `PatcherAutoencoder` (`PatchEncoder` + `PatchDecoder`). They can be pretrained first with reconstruction loss and then plugged into `TinyPatchLM`.
 - Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both LM training and patcher pretraining use AdamW; patcher pretraining can reduce LR automatically once `patcher_train.lr_reduce_threshold` is reached.
+- Patcher stage sequence lengths are independently configurable with `patcher_train.seq_len_tokens` and `patcher2_train.seq_len_tokens`, so each patcher can train on its own context budget instead of inheriting full LM token context.
 - Main model AMP behavior is configurable under `train` (`amp_enabled`, `amp_dtype`) and is applied inside `TinyPatchLM` forward for CUDA runs.
 - Patcher AMP is independently configurable via `patcher_train.amp_enabled` and `patcher_train.amp_dtype`.
 - Positional encoding mode is configurable with `model.pos_encoding: `learned | rope`; RoPE rotates attention Q/K only and uses precomputed cos/sin caches up to max sequence length.

@@ -128,7 +128,7 @@ def main():
 
     device = get_device()
     out_dir = ensure_dir(tcfg.get("out_dir", "outputs"))
-    processed_dir = Path(cfg["data"]["processed_dir"])
+    processed_dir = Path(cfg["data"].get("processed_dir_tiny", cfg["data"]["processed_dir"]))
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     resume_ckpt = None

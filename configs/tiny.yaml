@@ -6,6 +6,9 @@ data:
   raw_path: data/raw
   pattern: "*.txt"
   processed_dir: data/processed
+  processed_dir_patcher: data/processed/patcher
+  processed_dir_patcher2: data/processed/patcher2
+  processed_dir_tiny: data/processed/tiny
   train_split: 0.95
 
 model:
@@ -40,6 +43,7 @@ patcher2:
   freeze: false
 
 patcher2_train:
+  seq_len_tokens: 1024
   batch_size: 8
   max_steps: 3000
   eval_every: 100
@@ -53,6 +57,7 @@ patcher2_train:
   amp_dtype: float16
 
 patcher_train:
+  seq_len_tokens: 1024
   batch_size: 8
   max_steps: 3000
   eval_every: 100

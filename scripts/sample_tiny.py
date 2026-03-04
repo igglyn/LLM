@@ -59,7 +59,7 @@ def main():
     cfg = load_config(args.config)
     device = get_device()
 
-    processed_dir = Path(cfg["data"]["processed_dir"])
+    processed_dir = Path(cfg["data"].get("processed_dir_tiny", cfg["data"]["processed_dir"]))
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     train_cfg = cfg["train"]

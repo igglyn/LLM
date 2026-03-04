@@ -62,8 +62,8 @@ def maybe_reduce_lr_by_threshold(optimizer, val_loss: float, patcher_train: dict
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
-    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
-    return int(model_cfg["seq_len"]) * p1 * p2
+    default_seq_len = int(model_cfg["seq_len"]) * p1
+    return int(cfg.get("patcher_train", {}).get("seq_len_tokens", default_seq_len))
 
 
 def main():
@@ -75,7 +75,7 @@ def main():
     set_seed(int(cfg["train"].get("seed", 42)))
 
     device = get_device()
-    processed_dir = Path(cfg["data"]["processed_dir"])
+    processed_dir = Path(cfg["data"].get("processed_dir_patcher", cfg["data"]["processed_dir"]))
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     patcher_train = cfg.get("patcher_train", {})

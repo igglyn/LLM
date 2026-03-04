@@ -11,6 +11,7 @@ if str(SRC) not in sys.path:
 
 import argparse
 import json
+import shutil
 
 import numpy as np
 
@@ -20,7 +21,7 @@ from blt_lite.utils import ensure_dir, load_config
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Prepare explicit stage-1 (patcher) token data from raw text.")
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
@@ -45,7 +46,7 @@ def main():
     train_ids = all_ids[:split]
     val_ids = all_ids[split:]
 
-    out_dir = ensure_dir(cfg["data"]["processed_dir"])
+    out_dir = ensure_dir(cfg["data"].get("processed_dir_patcher", cfg["data"]["processed_dir"]))
     np.save(out_dir / "train_tokens.npy", train_ids)
     np.save(out_dir / "val_tokens.npy", val_ids)
     tokenizer.save(out_dir / "tokenizer.json")
@@ -54,7 +55,12 @@ def main():
     with open(out_dir / "diagnostics.json", "w", encoding="utf-8") as f:
         json.dump(diagnostics, f, indent=2)
 
-    print(f"Prepared data in {out_dir}")
+    base_dir = ensure_dir(cfg["data"]["processed_dir"])
+    for fname in ("train_tokens.npy", "val_tokens.npy", "tokenizer.json", "diagnostics.json"):
+        shutil.copy2(out_dir / fname, base_dir / fname)
+
+    print(f"Prepared explicit patcher stage data in {out_dir}")
+    print(f"Mirrored base processed artifacts in {base_dir}")
     print(json.dumps(diagnostics, indent=2))
 
 
