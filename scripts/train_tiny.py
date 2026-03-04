@@ -78,6 +78,12 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         use_amp=bool(cfg.get("train", {}).get("amp_enabled", True)),
         amp_dtype=str(cfg.get("train", {}).get("amp_dtype", "float16")),
         pos_encoding=str(model_cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(model_cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(model_cfg.get("flash_attention", True)),
+        patcher_grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
+        patcher2_grad_checkpointing=bool(cfg.get("patcher2", {}).get("grad_checkpointing", False)),
+        patcher_flash_attention=bool(patcher_cfg.get("flash_attention", True)),
+        patcher2_flash_attention=bool(cfg.get("patcher2", {}).get("flash_attention", True)),
     ).to(device)
 
 

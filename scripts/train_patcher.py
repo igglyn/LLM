@@ -39,6 +39,8 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
         n_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
         pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(patcher_cfg.get("flash_attention", True)),
     ).to(device)
     return emb, patcher
 

@@ -39,6 +39,8 @@ def build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
         n_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
         pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(patcher_cfg.get("flash_attention", True)),
     ).to(device)
     return emb, p1
 
@@ -59,6 +61,8 @@ def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
         n_heads=int(p2cfg.get("n_heads", model_cfg["n_heads"])),
         dropout=float(p2cfg.get("dropout", model_cfg["dropout"])),
         pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(p2cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(p2cfg.get("flash_attention", True)),
     ).to(device)
     return p2
 

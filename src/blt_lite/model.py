@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -32,8 +33,23 @@ def _build_rope_cache(max_seq_len: int, head_dim: int) -> tuple[torch.Tensor, to
     return cos, sin
 
 
+def _run_block_with_optional_checkpoint(
+    block: nn.Module,
+    x: torch.Tensor,
+    rope_cos: torch.Tensor | None,
+    rope_sin: torch.Tensor | None,
+    grad_checkpointing: bool,
+) -> torch.Tensor:
+    if grad_checkpointing and x.requires_grad:
+        def _forward(inp: torch.Tensor) -> torch.Tensor:
+            return block(inp, rope_cos=rope_cos, rope_sin=rope_sin)
+
+        return checkpoint(_forward, x, use_reentrant=False)
+    return block(x, rope_cos=rope_cos, rope_sin=rope_sin)
+
+
 class CausalSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float):
+    def __init__(self, d_model: int, n_heads: int, dropout: float, use_flash_attention: bool = True):
         super().__init__()
         if d_model % n_heads != 0:
             raise ValueError("d_model must be divisible by n_heads")
@@ -42,6 +58,23 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = dropout
+        self.use_flash_attention = use_flash_attention
+
+    def _attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        dropout_p = self.dropout if self.training else 0.0
+        if self.use_flash_attention and q.device.type == "cuda":
+            attention_ns = getattr(torch.nn, "attention", None)
+            sdpa_kernel = getattr(attention_ns, "sdpa_kernel", None) if attention_ns is not None else None
+            sdp_backend = getattr(attention_ns, "SDPBackend", None) if attention_ns is not None else None
+            if sdpa_kernel is not None and sdp_backend is not None:
+                backends = [
+                    sdp_backend.FLASH_ATTENTION,
+                    sdp_backend.EFFICIENT_ATTENTION,
+                    sdp_backend.MATH,
+                ]
+                with sdpa_kernel(backends=backends):
+                    return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True)
 
     def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None) -> torch.Tensor:
         bsz, t, d_model = x.shape
@@ -53,18 +86,16 @@ class CausalSelfAttention(nn.Module):
             sin = rope_sin[:, :, :t, :].to(device=x.device, dtype=q.dtype)
             q, k = _apply_rope(q, k, cos, sin)
 
-        out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True
-        )
+        out = self._attention(q, k, v)
         out = out.transpose(1, 2).contiguous().view(bsz, t, d_model)
         return self.out_proj(out)
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float):
+    def __init__(self, d_model: int, n_heads: int, dropout: float, use_flash_attention: bool = True):
         super().__init__()
         self.ln_1 = nn.LayerNorm(d_model)
-        self.attn = CausalSelfAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
+        self.attn = CausalSelfAttention(d_model=d_model, n_heads=n_heads, dropout=dropout, use_flash_attention=use_flash_attention)
         self.ln_2 = nn.LayerNorm(d_model)
         self.mlp = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
@@ -91,16 +122,24 @@ class PatchEncoder(nn.Module):
         patch_size: int,
         seq_len: int,
         pos_encoding: str = "learned",
+        grad_checkpointing: bool = False,
+        flash_attention: bool = True,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.max_patch_len = math.ceil(seq_len / patch_size)
+        self.grad_checkpointing = grad_checkpointing
         self.patch_proj = nn.Linear(in_dim * patch_size, d_model)
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("patcher pos_encoding must be one of: learned, rope")
         self.pos_encoding = pos_encoding
         self.patch_pos_emb = nn.Embedding(self.max_patch_len, d_model) if pos_encoding == "learned" else None
-        self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout, use_flash_attention=flash_attention)
+                for _ in range(max(1, n_layers))
+            ]
+        )
 
         if self.pos_encoding == "rope":
             head_dim = d_model // n_heads
@@ -129,7 +168,7 @@ class PatchEncoder(nn.Module):
         rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
         rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
         for block in self.blocks:
-            out = block(out, rope_cos=rope_cos, rope_sin=rope_sin)
+            out = _run_block_with_optional_checkpoint(block, out, rope_cos, rope_sin, self.training and self.grad_checkpointing)
         return out
 
 
@@ -145,10 +184,13 @@ class PatchDecoder(nn.Module):
         patch_size: int,
         seq_len: int,
         pos_encoding: str = "learned",
+        grad_checkpointing: bool = False,
+        flash_attention: bool = True,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.token_seq_len = seq_len
+        self.grad_checkpointing = grad_checkpointing
         self.query_proj = nn.Linear(token_dim, d_model)
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("patcher pos_encoding must be one of: learned, rope")
@@ -156,7 +198,12 @@ class PatchDecoder(nn.Module):
         self.token_pos_emb = nn.Embedding(self.token_seq_len, d_model) if pos_encoding == "learned" else None
 
         self.cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, dropout=dropout, batch_first=True)
-        self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout, use_flash_attention=flash_attention)
+                for _ in range(max(1, n_layers))
+            ]
+        )
         self.out_proj = nn.Linear(d_model, out_dim)
 
         if self.pos_encoding == "rope":
@@ -190,7 +237,7 @@ class PatchDecoder(nn.Module):
         rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
         rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
         for block in self.blocks:
-            out = block(out, rope_cos=rope_cos, rope_sin=rope_sin)
+            out = _run_block_with_optional_checkpoint(block, out, rope_cos, rope_sin, self.training and self.grad_checkpointing)
         return self.out_proj(out)
 
 
@@ -207,6 +254,8 @@ class PatcherAutoencoder(nn.Module):
         n_heads: int,
         dropout: float,
         pos_encoding: str = "learned",
+        grad_checkpointing: bool = False,
+        flash_attention: bool = True,
     ):
         super().__init__()
         self.token_seq_len = seq_len
@@ -219,6 +268,8 @@ class PatcherAutoencoder(nn.Module):
             patch_size=patch_size,
             seq_len=self.token_seq_len,
             pos_encoding=pos_encoding,
+            grad_checkpointing=grad_checkpointing,
+            flash_attention=flash_attention,
         )
         self.decoder = PatchDecoder(
             token_dim=in_dim,
@@ -230,6 +281,8 @@ class PatcherAutoencoder(nn.Module):
             patch_size=patch_size,
             seq_len=self.token_seq_len,
             pos_encoding=pos_encoding,
+            grad_checkpointing=grad_checkpointing,
+            flash_attention=flash_attention,
         )
 
     def forward(self, token_hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -264,6 +317,12 @@ class TinyPatchLM(nn.Module):
         use_amp: bool = True,
         amp_dtype: str = "float16",
         pos_encoding: str = "learned",
+        grad_checkpointing: bool = False,
+        flash_attention: bool = True,
+        patcher_grad_checkpointing: bool = False,
+        patcher2_grad_checkpointing: bool = False,
+        patcher_flash_attention: bool = True,
+        patcher2_flash_attention: bool = True,
     ):
         super().__init__()
         if patch_size <= 0 or patcher2_patch_size <= 0:
@@ -273,6 +332,7 @@ class TinyPatchLM(nn.Module):
         self.token_seq_len = seq_len * self.large_patch_size
         self.use_amp = use_amp
         self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
+        self.grad_checkpointing = grad_checkpointing
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("pos_encoding must be one of: learned, rope")
         self.pos_encoding = pos_encoding
@@ -291,6 +351,8 @@ class TinyPatchLM(nn.Module):
             n_heads=int(patcher_heads or n_heads),
             dropout=float(dropout if patcher_dropout is None else patcher_dropout),
             pos_encoding=patcher_pos_encoding,
+            grad_checkpointing=patcher_grad_checkpointing,
+            flash_attention=patcher_flash_attention,
         )
         self.patcher2 = PatcherAutoencoder(
             in_dim=d_model,
@@ -303,9 +365,16 @@ class TinyPatchLM(nn.Module):
             n_heads=int(patcher2_heads or n_heads),
             dropout=float(dropout if patcher2_dropout is None else patcher2_dropout),
             pos_encoding=patcher2_pos_encoding,
+            grad_checkpointing=patcher2_grad_checkpointing,
+            flash_attention=patcher2_flash_attention,
         )
 
-        self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout, use_flash_attention=flash_attention)
+                for _ in range(n_layers)
+            ]
+        )
         self.ln_f = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight
@@ -347,7 +416,7 @@ class TinyPatchLM(nn.Module):
             rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
             rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
             for block in self.blocks:
-                h = block(h, rope_cos=rope_cos, rope_sin=rope_sin)
+                h = _run_block_with_optional_checkpoint(block, h, rope_cos, rope_sin, self.training and self.grad_checkpointing)
 
             h = self.ln_f(h)
             logits = self.lm_head(h)

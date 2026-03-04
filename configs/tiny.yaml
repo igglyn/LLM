@@ -18,6 +18,8 @@ model:
   n_layers: 6
   n_heads: 6
   dropout: 0.1
+  grad_checkpointing: false
+  flash_attention: true
 
 patcher:
   patch_size: 1
@@ -27,6 +29,8 @@ patcher:
   decoder_layers: 2
   n_heads: 6
   dropout: 0.1
+  grad_checkpointing: false
+  flash_attention: true
   pretrained_path: ""
   freeze: false
 
@@ -39,6 +43,8 @@ patcher2:
   decoder_layers: 2
   n_heads: 6
   dropout: 0.1
+  grad_checkpointing: false
+  flash_attention: true
   pretrained_path: ""
   freeze: false
 
