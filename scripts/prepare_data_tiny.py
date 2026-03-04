@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import argparse
+import contextlib
 import json
 import shutil
 
@@ -20,6 +21,18 @@ from blt_lite.model import PatcherAutoencoder
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.utils import ensure_dir, get_device, load_config
 
+
+
+
+def _sdpa_math_context(device: torch.device):
+    if device.type != "cuda":
+        return contextlib.nullcontext()
+    attention_ns = getattr(torch.nn, "attention", None)
+    sdpa_kernel = getattr(attention_ns, "sdpa_kernel", None) if attention_ns is not None else None
+    sdp_backend = getattr(attention_ns, "SDPBackend", None) if attention_ns is not None else None
+    if sdpa_kernel is None or sdp_backend is None:
+        return contextlib.nullcontext()
+    return sdpa_kernel(backends=[sdp_backend.MATH])
 
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
@@ -79,10 +92,13 @@ def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoe
             end = min(len(tokens), start + chunk)
             ctx_start = max(0, start - seq_len + 1)
             x = torch.from_numpy(tokens[ctx_start:end].astype(np.int64)).unsqueeze(0).to(device)
-            token_hidden = emb(x)
-            h1, _ = p1(token_hidden)
-            h2 = h1 if p2 is None else p2(h1)[0]
+            with _sdpa_math_context(device):
+                token_hidden = emb(x)
+                h1, _ = p1(token_hidden)
+                h2 = h1 if p2 is None else p2(h1)[0]
             take_from = start - ctx_start
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
             hidden[start:end] = h2[:, take_from:, :].squeeze(0).to(torch.float16).cpu().numpy()
     hidden.flush()
 
