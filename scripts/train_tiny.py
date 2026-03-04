@@ -160,7 +160,9 @@ def main():
         lr=float(tcfg.get("lr_max", 3e-4)),
         weight_decay=float(tcfg["weight_decay"]),
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    amp_enabled = bool(tcfg.get("amp_enabled", True))
+    amp_dtype = torch.float16 if str(tcfg.get("amp_dtype", "float16")) == "float16" else torch.bfloat16
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_enabled))
 
     max_steps = int(tcfg["max_steps"])
     eval_every = int(tcfg.get("eval_every", 100))
@@ -181,7 +183,7 @@ def main():
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda"), dtype=torch.float16):
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
                 _, loss = model(x, y)
                 loss = loss / grad_accum_steps
 
