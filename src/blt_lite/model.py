@@ -82,8 +82,15 @@ class CausalSelfAttention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if rope_cos is not None and rope_sin is not None:
-            cos = rope_cos[:, :, :t, :].to(device=x.device, dtype=q.dtype)
-            sin = rope_sin[:, :, :t, :].to(device=x.device, dtype=q.dtype)
+            cos = rope_cos
+            sin = rope_sin
+            if cos.size(-2) < t or sin.size(-2) < t or cos.size(-1) != q.size(-1) or sin.size(-1) != q.size(-1):
+                cos, sin = _build_rope_cache(t, q.size(-1))
+            else:
+                cos = cos[:, :, :t, :]
+                sin = sin[:, :, :t, :]
+            cos = cos.to(device=x.device, dtype=q.dtype)
+            sin = sin.to(device=x.device, dtype=q.dtype)
             q, k = _apply_rope(q, k, cos, sin)
 
         out = self._attention(q, k, v)
