@@ -14,43 +14,125 @@ import json
 import shutil
 
 import numpy as np
+import torch
 
-from blt_lite.utils import ensure_dir, load_config
+from blt_lite.model import PatcherAutoencoder
+from blt_lite.tokenizer import FixedPatchTokenizer
+from blt_lite.utils import ensure_dir, get_device, load_config
 
 
-def _copy_stage(source_dir: Path, dest_dir: Path) -> dict:
-    ensure_dir(dest_dir)
-    for fname in ("train_tokens.npy", "val_tokens.npy", "tokenizer.json"):
-        src = source_dir / fname
-        if not src.exists():
-            raise FileNotFoundError(f"Missing required source artifact: {src}")
-        shutil.copy2(src, dest_dir / fname)
+def _token_seq_len_from_cfg(cfg: dict) -> int:
+    model_cfg = cfg["model"]
+    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    return int(model_cfg["seq_len"]) * p1 * p2
 
-    train_tokens = np.load(dest_dir / "train_tokens.npy", mmap_mode="r")
-    val_tokens = np.load(dest_dir / "val_tokens.npy", mmap_mode="r")
-    return {
-        "source_dir": str(source_dir),
-        "stage_dir": str(dest_dir),
-        "train_tokens": int(train_tokens.shape[0]),
-        "val_tokens": int(val_tokens.shape[0]),
-    }
+
+def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
+    model_cfg = cfg["model"]
+    patcher_cfg = cfg["patcher"]
+    p2cfg = cfg["patcher2"]
+    d_model = int(model_cfg["d_model"])
+    seq_len = _token_seq_len_from_cfg(cfg)
+
+    emb = torch.nn.Embedding(tokenizer.vocab_len, d_model).to(device)
+    p1 = PatcherAutoencoder(
+        in_dim=d_model,
+        latent_dim=int(patcher_cfg.get("latent_dim", d_model)),
+        out_dim=d_model,
+        patch_size=int(patcher_cfg.get("patch_size", 1)),
+        seq_len=seq_len,
+        encoder_layers=int(patcher_cfg.get("encoder_layers", 2)),
+        decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
+        n_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
+        dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
+        pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(patcher_cfg.get("flash_attention", True)),
+    ).to(device)
+    p2 = PatcherAutoencoder(
+        in_dim=d_model,
+        latent_dim=int(p2cfg.get("latent_dim", d_model)),
+        out_dim=d_model,
+        patch_size=int(p2cfg.get("patch_size", 2)),
+        seq_len=seq_len,
+        encoder_layers=int(p2cfg.get("encoder_layers", 2)),
+        decoder_layers=int(p2cfg.get("decoder_layers", 2)),
+        n_heads=int(p2cfg.get("n_heads", model_cfg["n_heads"])),
+        dropout=float(p2cfg.get("dropout", model_cfg["dropout"])),
+        pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(p2cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(p2cfg.get("flash_attention", True)),
+    ).to(device)
+    return emb, p1, p2, d_model, seq_len
+
+
+def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoencoder, p2: PatcherAutoencoder, seq_len: int, device: torch.device, out_path: Path, d_model: int):
+    hidden = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float16, shape=(len(tokens), d_model))
+    chunk = max(seq_len, 1)
+    with torch.no_grad():
+        for start in range(0, len(tokens), chunk):
+            end = min(len(tokens), start + chunk)
+            ctx_start = max(0, start - seq_len + 1)
+            x = torch.from_numpy(tokens[ctx_start:end].astype(np.int64)).unsqueeze(0).to(device)
+            token_hidden = emb(x)
+            h1, _ = p1(token_hidden)
+            h2, _ = p2(h1)
+            take_from = start - ctx_start
+            hidden[start:end] = h2[:, take_from:, :].squeeze(0).to(torch.float16).cpu().numpy()
+    hidden.flush()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare explicit TinyPatchLM token artifacts.")
+    parser = argparse.ArgumentParser(description="Prepare explicit TinyPatchLM token artifacts and cached stage2 hidden states.")
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     data_cfg = cfg["data"]
-    source_dir = Path(data_cfg.get("processed_dir_patcher2", data_cfg.get("processed_dir_patcher", data_cfg["processed_dir"])))
-    out_dir = Path(data_cfg.get("processed_dir_tiny", "data/processed/tiny"))
+    source_dir = Path(data_cfg["processed_dir_patcher2"])
+    out_dir = ensure_dir(data_cfg["processed_dir_tiny"])
 
-    summary = _copy_stage(source_dir, out_dir)
-    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
-    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
-    summary["model_seq_len_large_patches"] = int(cfg["model"]["seq_len"])
-    summary["effective_token_seq_len"] = int(cfg["model"]["seq_len"]) * p1 * p2
+    for fname in ("train_tokens.npy", "val_tokens.npy", "tokenizer.json"):
+        src = source_dir / fname
+        if not src.exists():
+            raise FileNotFoundError(f"Missing required source artifact: {src}")
+        shutil.copy2(src, out_dir / fname)
+
+    device = get_device()
+    tokenizer = FixedPatchTokenizer.load(out_dir / "tokenizer.json")
+    emb, p1, p2, d_model, seq_len = _build_patchers(cfg, tokenizer, device)
+
+    p1_path = cfg.get("patcher", {}).get("pretrained_path", "")
+    p2_path = cfg.get("patcher2", {}).get("pretrained_path", "")
+    if not p1_path or not p2_path:
+        raise ValueError("Both patcher.pretrained_path and patcher2.pretrained_path must be set before preparing tiny hidden states")
+
+    ckpt1 = torch.load(p1_path, map_location=device)
+    if "token_emb" not in ckpt1:
+        raise ValueError("patcher checkpoint must include token_emb state for tiny preprocessing")
+    emb.load_state_dict(ckpt1["token_emb"])
+    p1.load_state_dict(ckpt1["patcher"] if isinstance(ckpt1, dict) and "patcher" in ckpt1 else ckpt1)
+
+    ckpt2 = torch.load(p2_path, map_location=device)
+    p2.load_state_dict(ckpt2["patcher2"] if isinstance(ckpt2, dict) and "patcher2" in ckpt2 else ckpt2)
+    emb.eval(); p1.eval(); p2.eval()
+
+    train_tokens = np.load(out_dir / "train_tokens.npy")
+    val_tokens = np.load(out_dir / "val_tokens.npy")
+    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
+    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
+
+    summary = {
+        "source_dir": str(source_dir),
+        "stage_dir": str(out_dir),
+        "train_tokens": int(train_tokens.shape[0]),
+        "val_tokens": int(val_tokens.shape[0]),
+        "train_stage2_hidden": "train_stage2_hidden.npy",
+        "val_stage2_hidden": "val_stage2_hidden.npy",
+        "model_seq_len_large_patches": int(cfg["model"]["seq_len"]),
+        "effective_token_seq_len": seq_len,
+    }
 
     with open(out_dir / "stage_info.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)

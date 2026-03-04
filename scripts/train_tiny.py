@@ -13,7 +13,9 @@ import argparse
 import math
 import re
 
+import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from blt_lite.model import TinyPatchLM
 from blt_lite.tokenizer import FixedPatchTokenizer
@@ -23,6 +25,29 @@ from torch.optim import AdamW
 
 
 _STEP_RE = re.compile(r"step_(\d+)\.pt$")
+
+
+class HiddenCausalDataset(Dataset):
+    def __init__(self, hidden_path: Path, tokens_path: Path, seq_len: int):
+        hidden = np.load(hidden_path, mmap_mode="r")
+        tokens = np.load(tokens_path, mmap_mode="r")
+        if hidden.ndim != 2:
+            raise ValueError(f"Expected 2D hidden cache at {hidden_path}, got shape={hidden.shape}")
+        if hidden.shape[0] != tokens.shape[0]:
+            raise ValueError("Hidden cache and token stream length mismatch")
+        if hidden.shape[0] <= seq_len:
+            raise ValueError("Not enough cached hidden states for sequence length")
+        self.hidden = torch.from_numpy(np.asarray(hidden, dtype=np.float32))
+        self.tokens = torch.from_numpy(np.asarray(tokens, dtype=np.int64))
+        self.seq_len = seq_len
+
+    def __len__(self) -> int:
+        return self.hidden.shape[0] - self.seq_len - 1
+
+    def __getitem__(self, idx: int):
+        xh = self.hidden[idx : idx + self.seq_len]
+        y = self.tokens[idx + 1 : idx + self.seq_len + 1]
+        return xh, y
 
 
 def warmup_cosine_lr(step: int, max_steps: int, warmup_steps: int, lr_max: float, lr_min: float) -> float:
@@ -87,8 +112,6 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
     ).to(device)
 
 
-
-
 def _maybe_load_pretrained_patcher(model: TinyPatchLM, cfg: dict, device: torch.device) -> None:
     patcher_cfg = cfg.get("patcher", {})
     path = patcher_cfg.get("pretrained_path", "")
@@ -116,6 +139,21 @@ def _token_seq_len_from_cfg(cfg: dict) -> int:
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
     p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
     return int(model_cfg["seq_len"]) * p1 * p2
+
+
+def _evaluate_from_hidden(model: TinyPatchLM, val_loader: DataLoader, device: torch.device, max_batches: int | None = None) -> float:
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for batch_idx, (xh, y) in enumerate(val_loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
+            xh = xh.to(device)
+            y = y.to(device)
+            _, loss = model.forward_from_hidden(xh, y)
+            losses.append(loss.item())
+    model.train()
+    return float(sum(losses) / max(1, len(losses)))
 
 
 def main():
@@ -148,15 +186,36 @@ def main():
         step = parse_step_from_checkpoint_name(ckpt_path)
 
     seq_len = _token_seq_len_from_cfg(cfg)
-    train_loader, val_loader = build_dataloaders(
-        processed_dir / "train_tokens.npy",
-        processed_dir / "val_tokens.npy",
-        seq_len=seq_len,
-        batch_size=int(tcfg["batch_size"]),
-    )
+    cached_train = processed_dir / "train_stage2_hidden.npy"
+    cached_val = processed_dir / "val_stage2_hidden.npy"
+    use_cached_hidden = cached_train.exists() and cached_val.exists()
+
+    if use_cached_hidden:
+        train_loader = DataLoader(
+            HiddenCausalDataset(cached_train, processed_dir / "train_tokens.npy", seq_len),
+            batch_size=int(tcfg["batch_size"]),
+            shuffle=True,
+            drop_last=True,
+        )
+        val_loader = DataLoader(
+            HiddenCausalDataset(cached_val, processed_dir / "val_tokens.npy", seq_len),
+            batch_size=int(tcfg["batch_size"]),
+            shuffle=False,
+            drop_last=False,
+        )
+        print("Using cached stage2 hidden states for tiny LM training")
+    else:
+        train_loader, val_loader = build_dataloaders(
+            processed_dir / "train_tokens.npy",
+            processed_dir / "val_tokens.npy",
+            seq_len=seq_len,
+            batch_size=int(tcfg["batch_size"]),
+        )
 
     model = _build_model_from_cfg(cfg, tokenizer, device)
-    _maybe_load_pretrained_patcher(model, cfg, device)
+    if not use_cached_hidden:
+        _maybe_load_pretrained_patcher(model, cfg, device)
+
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model"])
         print(f"Resumed from checkpoint {ckpt_path} at step={step}")
@@ -183,15 +242,23 @@ def main():
     best_val = float("inf")
     model.train()
     while step < max_steps:
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for batch in train_loader:
             lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min)
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
-                _, loss = model(x, y)
-                loss = loss / grad_accum_steps
+            if use_cached_hidden:
+                xh, y = batch
+                xh, y = xh.to(device), y.to(device)
+                with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
+                    _, loss = model.forward_from_hidden(xh, y)
+                    loss = loss / grad_accum_steps
+            else:
+                x, y = batch
+                x, y = x.to(device), y.to(device)
+                with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
+                    _, loss = model(x, y)
+                    loss = loss / grad_accum_steps
 
             scaler.scale(loss).backward()
 
@@ -206,7 +273,7 @@ def main():
                 print(f"step={step} train_loss={loss.item() * grad_accum_steps:.4f} lr={lr:.6f}")
 
             if step % eval_every == 0 and step > 0:
-                val_loss = evaluate(model, val_loader, device, max_batches=eval_batches)
+                val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches) if use_cached_hidden else evaluate(model, val_loader, device, max_batches=eval_batches)
                 print(f"step={step} val_loss={val_loss:.4f}")
                 if val_loss < best_val:
                     best_val = val_loss

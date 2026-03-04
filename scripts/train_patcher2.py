@@ -11,38 +11,40 @@ if str(SRC) not in sys.path:
 
 import argparse
 
+import numpy as np
 import torch
 from torch.optim import AdamW
+from torch.utils.data import DataLoader, Dataset
 
 from blt_lite.model import PatcherAutoencoder
 from blt_lite.tokenizer import FixedPatchTokenizer
-from blt_lite.train import build_dataloaders
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
 
 
-def build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
-    model_cfg = cfg["model"]
-    patcher_cfg = cfg["patcher"]
-    seq_len = _token_seq_len_from_cfg(cfg)
-    patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
-    d_model = int(model_cfg["d_model"])
+class HiddenReconstructionDataset(Dataset):
+    def __init__(self, hidden_path: Path, seq_len: int):
+        hidden = np.load(hidden_path, mmap_mode="r")
+        if hidden.ndim != 2:
+            raise ValueError(f"Expected 2D hidden cache at {hidden_path}, got shape={hidden.shape}")
+        if hidden.shape[0] <= seq_len:
+            raise ValueError("Not enough cached hidden states for sequence length")
+        self.hidden = torch.from_numpy(np.asarray(hidden, dtype=np.float32))
+        self.seq_len = seq_len
 
-    emb = torch.nn.Embedding(tokenizer.vocab_len, d_model).to(device)
-    p1 = PatcherAutoencoder(
-        in_dim=d_model,
-        latent_dim=int(patcher_cfg.get("latent_dim", d_model)),
-        out_dim=d_model,
-        patch_size=patch_size,
-        seq_len=seq_len,
-        encoder_layers=int(patcher_cfg.get("encoder_layers", 2)),
-        decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
-        n_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
-        dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
-        pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
-        grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
-        flash_attention=bool(patcher_cfg.get("flash_attention", True)),
-    ).to(device)
-    return emb, p1
+    def __len__(self) -> int:
+        return self.hidden.shape[0] - self.seq_len
+
+    def __getitem__(self, idx: int):
+        x = self.hidden[idx : idx + self.seq_len]
+        return x, x
+
+
+def _token_seq_len_from_cfg(cfg: dict) -> int:
+    model_cfg = cfg["model"]
+    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    default_seq_len = int(model_cfg["seq_len"]) * p1 * p2
+    return int(cfg.get("patcher2_train", {}).get("seq_len_tokens", default_seq_len))
 
 
 def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
@@ -67,14 +69,6 @@ def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
     return p2
 
 
-def _token_seq_len_from_cfg(cfg: dict) -> int:
-    model_cfg = cfg["model"]
-    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
-    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
-    default_seq_len = int(model_cfg["seq_len"]) * p1 * p2
-    return int(cfg.get("patcher2_train", {}).get("seq_len_tokens", default_seq_len))
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -87,30 +81,27 @@ def main():
     processed_dir = Path(cfg["data"]["processed_dir_patcher2"])
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
+    seq_len = _token_seq_len_from_cfg(cfg)
+    train_hidden = processed_dir / "train_stage1_hidden.npy"
+    val_hidden = processed_dir / "val_stage1_hidden.npy"
+    if not train_hidden.exists() or not val_hidden.exists():
+        raise FileNotFoundError("Missing cached stage1 hidden states. Run scripts/prepare_data_patcher2.py first.")
+
     p2train = cfg.get("patcher2_train", {})
-    train_loader, val_loader = build_dataloaders(
-        processed_dir / "train_tokens.npy",
-        processed_dir / "val_tokens.npy",
-        seq_len=_token_seq_len_from_cfg(cfg),
+    train_loader = DataLoader(
+        HiddenReconstructionDataset(train_hidden, seq_len),
         batch_size=int(p2train.get("batch_size", cfg["train"]["batch_size"])),
+        shuffle=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        HiddenReconstructionDataset(val_hidden, seq_len),
+        batch_size=int(p2train.get("batch_size", cfg["train"]["batch_size"])),
+        shuffle=False,
+        drop_last=False,
     )
 
-    token_emb, patcher1 = build_stage1(cfg, tokenizer, device)
     patcher2 = build_stage2(cfg, tokenizer, device)
-
-    p1_path = cfg.get("patcher", {}).get("pretrained_path", "")
-    if not p1_path:
-        raise ValueError("patcher.pretrained_path must be set before training patcher2")
-    ckpt = torch.load(p1_path, map_location=device)
-    if "token_emb" in ckpt:
-        token_emb.load_state_dict(ckpt["token_emb"])
-    state = ckpt["patcher"] if isinstance(ckpt, dict) and "patcher" in ckpt else ckpt
-    patcher1.load_state_dict(state)
-    token_emb.eval(); patcher1.eval()
-    for p in token_emb.parameters():
-        p.requires_grad = False
-    for p in patcher1.parameters():
-        p.requires_grad = False
 
     optimizer = AdamW(
         patcher2.parameters(),
@@ -127,22 +118,19 @@ def main():
     eval_batches = int(p2train.get("eval_batches", 50))
     save_every = int(p2train.get("save_every", 200))
 
-    def batch_loss(x: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            token_hidden = token_emb(x)
-            stage1_hidden, _ = patcher1(token_hidden)
-        stage2_hidden, _ = patcher2(stage1_hidden)
-        return torch.nn.functional.mse_loss(stage2_hidden, stage1_hidden)
+    def batch_loss(h: torch.Tensor) -> torch.Tensor:
+        recon, _ = patcher2(h)
+        return torch.nn.functional.mse_loss(recon, h)
 
     best_val = float("inf")
     step = 0
     patcher2.train()
     while step < max_steps:
-        for x, _ in train_loader:
-            x = x.to(device)
+        for h, _ in train_loader:
+            h = h.to(device)
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
-                loss = batch_loss(x)
+                loss = batch_loss(h)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(patcher2.parameters(), float(p2train.get("grad_clip", 1.0)))
@@ -156,10 +144,10 @@ def main():
                 patcher2.eval()
                 losses = []
                 with torch.no_grad():
-                    for vx, _ in val_loader:
-                        vx = vx.to(device)
+                    for vh, _ in val_loader:
+                        vh = vh.to(device)
                         with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
-                            losses.append(batch_loss(vx).item())
+                            losses.append(batch_loss(vh).item())
                         if len(losses) >= eval_batches:
                             break
                 val_loss = float(sum(losses) / max(1, len(losses)))

@@ -64,6 +64,7 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens. Data preparation is patch-agnostic; patching happens inside model/patcher modules.
 - Training scripts consume only staged prepared directories: `data.processed_dir_patcher`, `data.processed_dir_patcher2`, and `data.processed_dir_tiny` (no fallback to base processed dir).
+- `prepare_data_patcher2.py` now precomputes and stores stage-1 hidden streams (`*_stage1_hidden.npy`), and `prepare_data_tiny.py` precomputes stage-2 hidden streams (`*_stage2_hidden.npy`) so later training stages avoid re-running upstream patchers every step.
 - Patcher and unpatcher are fully isolated in `PatcherAutoencoder` (`PatchEncoder` + `PatchDecoder`). They can be pretrained first with reconstruction loss and then plugged into `TinyPatchLM`.
 - Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both LM training and patcher pretraining use AdamW; patcher pretraining can reduce LR automatically once `patcher_train.lr_reduce_threshold` is reached.
 - Patcher stage sequence lengths are independently configurable with `patcher_train.seq_len_tokens` and `patcher2_train.seq_len_tokens`, so each patcher can train on its own context budget instead of inheriting full LM token context.

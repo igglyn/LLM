@@ -413,6 +413,16 @@ class TinyPatchLM(nn.Module):
             h, _ = self.patcher(h)
             h, _ = self.patcher2(h)
 
+        return self.forward_from_hidden(h, targets)
+
+
+    def forward_from_hidden(self, h: torch.Tensor, targets: torch.Tensor | None = None):
+        _, token_t, _ = h.shape
+        if token_t > self.token_seq_len:
+            raise ValueError(f"sequence length {token_t} exceeds model token limit {self.token_seq_len} (derived from model.seq_len large patches)")
+
+        amp_enabled = self.use_amp and (h.device.type == "cuda")
+        with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=self.amp_dtype):
             rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
             rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
             for block in self.blocks:
