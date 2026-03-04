@@ -23,7 +23,7 @@ from torch.optim import AdamW
 def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
     model_cfg = cfg["model"]
     patcher_cfg = cfg["patcher"]
-    seq_len = int(cfg["data"]["seq_len"])
+    seq_len = int(cfg["model"]["seq_len"])
     patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
     d_model = int(model_cfg["d_model"])
 
@@ -75,7 +75,7 @@ def main():
     train_loader, val_loader = build_dataloaders(
         processed_dir / "train_tokens.npy",
         processed_dir / "val_tokens.npy",
-        seq_len=int(cfg["data"]["seq_len"]),
+        seq_len=int(cfg["model"]["seq_len"]),
         batch_size=int(patcher_train.get("batch_size", cfg["train"]["batch_size"])),
     )
 

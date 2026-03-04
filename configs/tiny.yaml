@@ -7,9 +7,9 @@ data:
   pattern: "*.txt"
   processed_dir: data/processed
   train_split: 0.95
-  seq_len: 256
 
 model:
+  seq_len: 256
   d_model: 384
   pos_encoding: learned
   n_layers: 6

@@ -53,11 +53,10 @@ def _resolve_checkpoint_path(raw_path: str, out_dir: Path) -> Path:
 
 def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device) -> TinyPatchLM:
     model_cfg = cfg["model"]
-    data_cfg = cfg["data"]
     patcher_cfg = cfg.get("patcher", {})
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
-        seq_len=int(data_cfg["seq_len"]),
+        seq_len=int(model_cfg["seq_len"]),
         patch_size=int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1))),
         d_model=int(model_cfg["d_model"]),
         n_layers=int(model_cfg["n_layers"]),
@@ -135,7 +134,7 @@ def main():
             tcfg = cfg["train"]
         step = parse_step_from_checkpoint_name(ckpt_path)
 
-    seq_len = int(cfg["data"]["seq_len"])
+    seq_len = int(cfg["model"]["seq_len"])
     train_loader, val_loader = build_dataloaders(
         processed_dir / "train_tokens.npy",
         processed_dir / "val_tokens.npy",

@@ -31,8 +31,7 @@ def main():
         raise RuntimeError("No text files found in data/raw path.")
 
     tok_cfg = cfg.get("tokenizer", {})
-    patcher_cfg = cfg.get("patcher", {})
-    tokenizer = FixedPatchTokenizer(patch_size=int(patcher_cfg.get("patch_size", 1)))
+    tokenizer = FixedPatchTokenizer(patch_size=1)
     tokenizer.fit(texts)
 
     add_bos = tok_cfg.get("add_bos", True)

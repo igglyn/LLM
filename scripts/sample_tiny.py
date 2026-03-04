@@ -20,11 +20,10 @@ from blt_lite.utils import get_device, load_config
 
 def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device) -> TinyPatchLM:
     model_cfg = cfg["model"]
-    data_cfg = cfg["data"]
     patcher_cfg = cfg.get("patcher", {})
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
-        seq_len=int(data_cfg["seq_len"]),
+        seq_len=int(model_cfg["seq_len"]),
         patch_size=int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1))),
         d_model=int(model_cfg["d_model"]),
         n_layers=int(model_cfg["n_layers"]),
