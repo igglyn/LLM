@@ -353,6 +353,7 @@ class TinyPatchLM(nn.Module):
         patcher_dropout: float | None = None,
         patcher_pos_encoding: str = "learned",
         patcher2_patch_size: int = 2,
+        use_patcher2: bool = True,
         patcher2_latent_dim: int = 384,
         patcher2_encoder_layers: int = 2,
         patcher2_decoder_layers: int = 2,
@@ -377,7 +378,9 @@ class TinyPatchLM(nn.Module):
         if patch_size <= 0 or patcher2_patch_size <= 0:
             raise ValueError("patch sizes must be > 0")
         self.seq_len = seq_len  # large-patch context length
-        self.large_patch_size = patch_size * patcher2_patch_size
+        self.use_patcher2 = use_patcher2
+        effective_patcher2_size = patcher2_patch_size if use_patcher2 else 1
+        self.large_patch_size = patch_size * effective_patcher2_size
         self.token_seq_len = seq_len * self.large_patch_size
         self.use_amp = use_amp
         self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
@@ -405,21 +408,25 @@ class TinyPatchLM(nn.Module):
             block_attention=patcher_block_attention,
             block_size=patcher_block_size,
         )
-        self.patcher2 = PatcherAutoencoder(
-            in_dim=d_model,
-            latent_dim=patcher2_latent_dim,
-            out_dim=d_model,
-            patch_size=patcher2_patch_size,
-            seq_len=self.token_seq_len,
-            encoder_layers=patcher2_encoder_layers,
-            decoder_layers=patcher2_decoder_layers,
-            n_heads=int(patcher2_heads or n_heads),
-            dropout=float(dropout if patcher2_dropout is None else patcher2_dropout),
-            pos_encoding=patcher2_pos_encoding,
-            grad_checkpointing=patcher2_grad_checkpointing,
-            flash_attention=patcher2_flash_attention,
-            block_attention=patcher2_block_attention,
-            block_size=patcher2_block_size,
+        self.patcher2 = (
+            PatcherAutoencoder(
+                in_dim=d_model,
+                latent_dim=patcher2_latent_dim,
+                out_dim=d_model,
+                patch_size=patcher2_patch_size,
+                seq_len=self.token_seq_len,
+                encoder_layers=patcher2_encoder_layers,
+                decoder_layers=patcher2_decoder_layers,
+                n_heads=int(patcher2_heads or n_heads),
+                dropout=float(dropout if patcher2_dropout is None else patcher2_dropout),
+                pos_encoding=patcher2_pos_encoding,
+                grad_checkpointing=patcher2_grad_checkpointing,
+                flash_attention=patcher2_flash_attention,
+                block_attention=patcher2_block_attention,
+                block_size=patcher2_block_size,
+            )
+            if use_patcher2
+            else None
         )
 
         self.blocks = nn.ModuleList(
@@ -447,6 +454,8 @@ class TinyPatchLM(nn.Module):
         self.patcher.load_state_dict(state)
 
     def load_patcher2_checkpoint(self, path: str | Path, map_location: torch.device | str | None = None) -> None:
+        if self.patcher2 is None:
+            raise ValueError("patcher2 is disabled for this model; cannot load patcher2 checkpoint")
         ckpt = torch.load(Path(path), map_location=map_location)
         state = ckpt["patcher2"] if isinstance(ckpt, dict) and "patcher2" in ckpt else ckpt
         self.patcher2.load_state_dict(state)
@@ -464,7 +473,8 @@ class TinyPatchLM(nn.Module):
                 h = h + self.token_pos_emb(pos)
 
             h, _ = self.patcher(h)
-            h, _ = self.patcher2(h)
+            if self.patcher2 is not None:
+                h, _ = self.patcher2(h)
 
         return self.forward_from_hidden(h, targets)
 

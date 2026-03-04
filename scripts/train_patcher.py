@@ -47,20 +47,26 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
     return emb, patcher
 
 
-def maybe_reduce_lr_by_threshold(optimizer, val_loss: float, patcher_train: dict, reduced_once: bool) -> bool:
-    threshold = patcher_train.get("lr_reduce_threshold")
-    if threshold is None or reduced_once:
-        return reduced_once
-    if val_loss > float(threshold):
-        return reduced_once
-
-    factor = float(patcher_train.get("lr_reduce_factor", 0.5))
+def maybe_reduce_lr_by_thresholds(optimizer, val_loss: float, patcher_train: dict, reduction_state: dict) -> dict:
+    thresholds = [
+        ("lr_reduce_threshold", "lr_reduce_factor"),
+        ("lr_reduce_threshold_2", "lr_reduce_factor_2"),
+    ]
     lr_min = float(patcher_train.get("lr_min", 1e-6))
-    for group in optimizer.param_groups:
-        old_lr = float(group["lr"])
-        group["lr"] = max(lr_min, old_lr * factor)
-        print(f"Reduced patcher LR due to threshold: {old_lr:.8f} -> {group['lr']:.8f}")
-    return True
+    for idx, (thr_key, fac_key) in enumerate(thresholds):
+        if reduction_state.get(idx, False):
+            continue
+        threshold = patcher_train.get(thr_key)
+        if threshold is None or val_loss > float(threshold):
+            continue
+
+        factor = float(patcher_train.get(fac_key, patcher_train.get("lr_reduce_factor", 0.5)))
+        for group in optimizer.param_groups:
+            old_lr = float(group["lr"])
+            group["lr"] = max(lr_min, old_lr * factor)
+            print(f"Reduced patcher LR via {thr_key}: {old_lr:.8f} -> {group['lr']:.8f}")
+        reduction_state[idx] = True
+    return reduction_state
 
 
 def _token_seq_len_from_cfg(cfg: dict) -> int:
@@ -113,7 +119,7 @@ def main():
 
     best_val = float("inf")
     step = 0
-    lr_reduced_by_threshold = False
+    lr_reduction_state: dict[int, bool] = {}
     patcher.train()
     token_emb.train()
     while step < max_steps:
@@ -151,12 +157,7 @@ def main():
                         {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
                         out_dir / "best.pt",
                     )
-                lr_reduced_by_threshold = maybe_reduce_lr_by_threshold(
-                    optimizer,
-                    val_loss,
-                    patcher_train,
-                    lr_reduced_by_threshold,
-                )
+                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, val_loss, patcher_train, lr_reduction_state)
                 patcher.train(); token_emb.train()
 
             if step % save_every == 0 and step > 0:

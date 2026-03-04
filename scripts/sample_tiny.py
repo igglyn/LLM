@@ -21,6 +21,8 @@ from blt_lite.utils import get_device, load_config
 def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device) -> TinyPatchLM:
     model_cfg = cfg["model"]
     patcher_cfg = cfg.get("patcher", {})
+    patcher2_cfg = cfg.get("patcher2", {})
+    use_patcher2 = bool(patcher2_cfg.get("enabled", True))
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
         seq_len=int(model_cfg["seq_len"]),
@@ -35,6 +37,7 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         patcher_dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
         patcher_pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        use_patcher2=use_patcher2,
         patcher2_patch_size=int(cfg.get("patcher2", {}).get("patch_size", 2)),
         patcher2_latent_dim=int(cfg.get("patcher2", {}).get("latent_dim", model_cfg["d_model"])),
         patcher2_encoder_layers=int(cfg.get("patcher2", {}).get("encoder_layers", 2)),
@@ -88,7 +91,9 @@ def main():
     token_ids = tokenizer.encode(args.prompt, add_bos=True, add_eos=False)
     idx = torch.tensor([token_ids], dtype=torch.long, device=device)
 
-    large_patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1))) * int(cfg.get("patcher2", {}).get("patch_size", 2))
+    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2)) if patcher2_enabled else 1
+    large_patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1))) * p2
     max_new_patches = int(cfg["sample"]["max_new_patches"])
     out = model.generate(
         idx,

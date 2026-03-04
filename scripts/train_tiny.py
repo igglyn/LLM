@@ -79,6 +79,8 @@ def _resolve_checkpoint_path(raw_path: str, out_dir: Path) -> Path:
 def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device) -> TinyPatchLM:
     model_cfg = cfg["model"]
     patcher_cfg = cfg.get("patcher", {})
+    patcher2_cfg = cfg.get("patcher2", {})
+    use_patcher2 = bool(patcher2_cfg.get("enabled", True))
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
         seq_len=int(model_cfg["seq_len"]),
@@ -93,6 +95,7 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         patcher_dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
         patcher_pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        use_patcher2=use_patcher2,
         patcher2_patch_size=int(cfg.get("patcher2", {}).get("patch_size", 2)),
         patcher2_latent_dim=int(cfg.get("patcher2", {}).get("latent_dim", model_cfg["d_model"])),
         patcher2_encoder_layers=int(cfg.get("patcher2", {}).get("encoder_layers", 2)),
@@ -128,20 +131,23 @@ def _maybe_load_pretrained_patcher(model: TinyPatchLM, cfg: dict, device: torch.
     print("Froze patcher parameters")
 
     patcher2_cfg = cfg.get("patcher2", {})
-    path2 = patcher2_cfg.get("pretrained_path", "")
-    if not path2:
-        raise ValueError("patcher2.pretrained_path must be set for tiny LM training (patcher2 is always frozen).")
-    model.load_patcher2_checkpoint(path2, map_location=device)
-    print(f"Loaded pretrained second patcher from {path2}")
-    for p in model.patcher2.parameters():
-        p.requires_grad = False
-    print("Froze second patcher parameters")
+    if bool(patcher2_cfg.get("enabled", True)):
+        path2 = patcher2_cfg.get("pretrained_path", "")
+        if not path2:
+            raise ValueError("patcher2.pretrained_path must be set for tiny LM training when patcher2 is enabled.")
+        model.load_patcher2_checkpoint(path2, map_location=device)
+        print(f"Loaded pretrained second patcher from {path2}")
+        if model.patcher2 is not None:
+            for p in model.patcher2.parameters():
+                p.requires_grad = False
+        print("Froze second patcher parameters")
 
 
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
-    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2)) if patcher2_enabled else 1
     return int(model_cfg["seq_len"]) * p1 * p2
 
 
@@ -158,6 +164,31 @@ def _evaluate_from_hidden(model: TinyPatchLM, val_loader: DataLoader, device: to
             losses.append(loss.item())
     model.train()
     return float(sum(losses) / max(1, len(losses)))
+
+
+
+def maybe_reduce_main_lr_by_thresholds(optimizer, val_loss: float, train_cfg: dict, reduction_state: dict) -> dict:
+    thresholds = [
+        ("lr_reduce_threshold", "lr_reduce_factor"),
+        ("lr_reduce_threshold_2", "lr_reduce_factor_2"),
+    ]
+    lr_min = float(train_cfg.get("lr_min", 3e-5))
+    scale = float(reduction_state.get("scale", 1.0))
+    for idx, (thr_key, fac_key) in enumerate(thresholds):
+        if reduction_state.get(idx, False):
+            continue
+        threshold = train_cfg.get(thr_key)
+        if threshold is None or val_loss > float(threshold):
+            continue
+        factor = float(train_cfg.get(fac_key, train_cfg.get("lr_reduce_factor", 0.5)))
+        scale *= factor
+        for group in optimizer.param_groups:
+            old_lr = float(group["lr"])
+            group["lr"] = max(lr_min, old_lr * factor)
+            print(f"Reduced main LR via {thr_key}: {old_lr:.8f} -> {group['lr']:.8f}")
+        reduction_state[idx] = True
+    reduction_state["scale"] = scale
+    return reduction_state
 
 
 def main():
@@ -244,10 +275,11 @@ def main():
     eval_batches = int(tcfg.get("eval_batches", 50))
 
     best_val = float("inf")
+    lr_reduction_state: dict[int, bool] = {}
     model.train()
     while step < max_steps:
         for batch in train_loader:
-            lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min)
+            lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min) * float(lr_reduction_state.get("scale", 1.0))
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
@@ -289,6 +321,7 @@ def main():
                         },
                         out_dir / "best.pt",
                     )
+                lr_reduction_state = maybe_reduce_main_lr_by_thresholds(optimizer, val_loss, tcfg, lr_reduction_state)
 
             if step % save_every == 0 and step > 0:
                 torch.save({"model": model.state_dict(), "config": cfg}, out_dir / f"step_{step}.pt")

@@ -24,7 +24,7 @@ from blt_lite.utils import ensure_dir, get_device, load_config
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
-    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2)) if bool(cfg.get("patcher2", {}).get("enabled", True)) else 1
     return int(model_cfg["seq_len"]) * p1 * p2
 
 
@@ -71,7 +71,7 @@ def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.dev
     return emb, p1, p2, d_model, seq_len
 
 
-def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoencoder, p2: PatcherAutoencoder, seq_len: int, device: torch.device, out_path: Path, d_model: int):
+def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoencoder, p2: PatcherAutoencoder | None, seq_len: int, device: torch.device, out_path: Path, d_model: int):
     hidden = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float16, shape=(len(tokens), d_model))
     chunk = max(seq_len, 1)
     with torch.no_grad():
@@ -81,7 +81,7 @@ def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoe
             x = torch.from_numpy(tokens[ctx_start:end].astype(np.int64)).unsqueeze(0).to(device)
             token_hidden = emb(x)
             h1, _ = p1(token_hidden)
-            h2, _ = p2(h1)
+            h2 = h1 if p2 is None else p2(h1)[0]
             take_from = start - ctx_start
             hidden[start:end] = h2[:, take_from:, :].squeeze(0).to(torch.float16).cpu().numpy()
     hidden.flush()
@@ -108,9 +108,12 @@ def main():
     emb, p1, p2, d_model, seq_len = _build_patchers(cfg, tokenizer, device)
 
     p1_path = cfg.get("patcher", {}).get("pretrained_path", "")
+    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
     p2_path = cfg.get("patcher2", {}).get("pretrained_path", "")
-    if not p1_path or not p2_path:
-        raise ValueError("Both patcher.pretrained_path and patcher2.pretrained_path must be set before preparing tiny hidden states")
+    if not p1_path:
+        raise ValueError("patcher.pretrained_path must be set before preparing tiny hidden states")
+    if patcher2_enabled and not p2_path:
+        raise ValueError("patcher2.pretrained_path must be set before preparing tiny hidden states when patcher2 is enabled")
 
     ckpt1 = torch.load(p1_path, map_location=device)
     if "token_emb" not in ckpt1:
@@ -118,14 +121,17 @@ def main():
     emb.load_state_dict(ckpt1["token_emb"])
     p1.load_state_dict(ckpt1["patcher"] if isinstance(ckpt1, dict) and "patcher" in ckpt1 else ckpt1)
 
-    ckpt2 = torch.load(p2_path, map_location=device)
-    p2.load_state_dict(ckpt2["patcher2"] if isinstance(ckpt2, dict) and "patcher2" in ckpt2 else ckpt2)
-    emb.eval(); p1.eval(); p2.eval()
+    if patcher2_enabled:
+        ckpt2 = torch.load(p2_path, map_location=device)
+        p2.load_state_dict(ckpt2["patcher2"] if isinstance(ckpt2, dict) and "patcher2" in ckpt2 else ckpt2)
+    emb.eval(); p1.eval();
+    if patcher2_enabled:
+        p2.eval()
 
     train_tokens = np.load(out_dir / "train_tokens.npy")
     val_tokens = np.load(out_dir / "val_tokens.npy")
-    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
-    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
+    _encode_stream(train_tokens, emb, p1, p2 if patcher2_enabled else None, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
+    _encode_stream(val_tokens, emb, p1, p2 if patcher2_enabled else None, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
 
     summary = {
         "source_dir": str(source_dir),

@@ -42,7 +42,7 @@ class HiddenReconstructionDataset(Dataset):
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
-    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2)) if bool(cfg.get("patcher2", {}).get("enabled", True)) else 1
     default_seq_len = int(model_cfg["seq_len"]) * p1 * p2
     return int(cfg.get("patcher2_train", {}).get("seq_len_tokens", default_seq_len))
 
@@ -77,6 +77,8 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if not bool(cfg.get("patcher2", {}).get("enabled", True)):
+        raise ValueError("patcher2 is disabled in config; skip train_patcher2.py or enable patcher2.enabled")
     set_seed(int(cfg["train"].get("seed", 42)))
 
     device = get_device()
