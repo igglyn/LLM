@@ -8,11 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _causal_mask(q_len: int, k_len: int, device: torch.device) -> torch.Tensor:
-    mask = torch.full((q_len, k_len), float("-inf"), device=device)
-    return torch.triu(mask, diagonal=1)
-
-
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.size(-1) // 2]
     x2 = x[..., x.size(-1) // 2 :]
@@ -46,11 +41,10 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
-        self.attn_dropout = dropout
-        self.resid_dropout = nn.Dropout(dropout)
+        self.dropout = dropout
 
     def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None) -> torch.Tensor:
-        bsz, t, d = x.shape
+        bsz, t, d_model = x.shape
         qkv = self.qkv(x).view(bsz, t, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -59,16 +53,11 @@ class CausalSelfAttention(nn.Module):
             sin = rope_sin[:, :, :t, :].to(device=x.device, dtype=q.dtype)
             q, k = _apply_rope(q, k, cos, sin)
 
-        attn = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=self.attn_dropout if self.training else 0.0,
-            is_causal=True,
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True
         )
-        attn = attn.transpose(1, 2).contiguous().view(bsz, t, d)
-        return self.resid_dropout(self.out_proj(attn))
+        out = out.transpose(1, 2).contiguous().view(bsz, t, d_model)
+        return self.out_proj(out)
 
 
 class TransformerBlock(nn.Module):
@@ -112,6 +101,7 @@ class PatchEncoder(nn.Module):
         self.pos_encoding = pos_encoding
         self.patch_pos_emb = nn.Embedding(self.max_patch_len, d_model) if pos_encoding == "learned" else None
         self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
+
         if self.pos_encoding == "rope":
             head_dim = d_model // n_heads
             cos, sin = _build_rope_cache(self.max_patch_len, head_dim)
@@ -130,15 +120,14 @@ class PatchEncoder(nn.Module):
 
         patch_t = padded_t // self.patch_size
         grouped = x.view(bsz, patch_t, self.patch_size, d_model)
-        patch_hidden = self.patch_proj(grouped.reshape(bsz, patch_t, self.patch_size * d_model))
+        out = self.patch_proj(grouped.reshape(bsz, patch_t, self.patch_size * d_model))
 
         if self.patch_pos_emb is not None:
             pos = torch.arange(0, patch_t, device=x.device).unsqueeze(0)
-            patch_hidden = patch_hidden + self.patch_pos_emb(pos)
+            out = out + self.patch_pos_emb(pos)
 
         rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
         rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
-        out = patch_hidden
         for block in self.blocks:
             out = block(out, rope_cos=rope_cos, rope_sin=rope_sin)
         return out
@@ -165,14 +154,10 @@ class PatchDecoder(nn.Module):
         self.pos_encoding = pos_encoding
         self.token_pos_emb = nn.Embedding(seq_len, d_model) if pos_encoding == "learned" else None
 
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=n_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
+        self.cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, dropout=dropout, batch_first=True)
         self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
         self.out_proj = nn.Linear(d_model, out_dim)
+
         if self.pos_encoding == "rope":
             head_dim = d_model // n_heads
             cos, sin = _build_rope_cache(seq_len, head_dim)
@@ -192,29 +177,23 @@ class PatchDecoder(nn.Module):
     def forward(self, token_hidden: torch.Tensor, patch_hidden: torch.Tensor) -> torch.Tensor:
         token_t = token_hidden.size(1)
         patch_t = patch_hidden.size(1)
+        query = self.query_proj(token_hidden)
         token_patch_mask = self._token_to_patch_mask(token_t, patch_t, token_hidden.device)
-        query_hidden = self.query_proj(token_hidden)
-        cross_hidden, _ = self.cross_attn(
-            query=query_hidden,
-            key=patch_hidden,
-            value=patch_hidden,
-            attn_mask=token_patch_mask,
-            need_weights=False,
-        )
-        dec_hidden = query_hidden + cross_hidden
+        cross_hidden, _ = self.cross_attn(query=query, key=patch_hidden, value=patch_hidden, attn_mask=token_patch_mask, need_weights=False)
+        out = query + cross_hidden
+
         if self.token_pos_emb is not None:
             pos = torch.arange(0, token_t, device=token_hidden.device).unsqueeze(0)
-            dec_hidden = dec_hidden + self.token_pos_emb(pos)
+            out = out + self.token_pos_emb(pos)
+
         rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
         rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
         for block in self.blocks:
-            dec_hidden = block(dec_hidden, rope_cos=rope_cos, rope_sin=rope_sin)
-        return self.out_proj(dec_hidden)
+            out = block(out, rope_cos=rope_cos, rope_sin=rope_sin)
+        return self.out_proj(out)
 
 
 class PatcherAutoencoder(nn.Module):
-    """Standalone patcher/unpatcher that compresses token states and reconstructs them."""
-
     def __init__(
         self,
         in_dim: int,
@@ -252,9 +231,9 @@ class PatcherAutoencoder(nn.Module):
         )
 
     def forward(self, token_hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        patch_hidden = self.encoder(token_hidden)
-        recon_hidden = self.decoder(token_hidden, patch_hidden)
-        return recon_hidden, patch_hidden
+        lat = self.encoder(token_hidden)
+        recon = self.decoder(token_hidden, lat)
+        return recon, lat
 
 
 class TinyPatchLM(nn.Module):
@@ -272,14 +251,21 @@ class TinyPatchLM(nn.Module):
         patcher_decoder_layers: int = 2,
         patcher_heads: int | None = None,
         patcher_dropout: float | None = None,
+        patcher_pos_encoding: str = "learned",
+        patcher2_patch_size: int = 2,
+        patcher2_latent_dim: int = 384,
+        patcher2_encoder_layers: int = 2,
+        patcher2_decoder_layers: int = 2,
+        patcher2_heads: int | None = None,
+        patcher2_dropout: float | None = None,
+        patcher2_pos_encoding: str = "learned",
         use_amp: bool = True,
         amp_dtype: str = "float16",
         pos_encoding: str = "learned",
-        patcher_pos_encoding: str = "learned",
     ):
         super().__init__()
-        if patch_size <= 0:
-            raise ValueError("patch_size must be > 0")
+        if patch_size <= 0 or patcher2_patch_size <= 0:
+            raise ValueError("patch sizes must be > 0")
         self.seq_len = seq_len
         self.use_amp = use_amp
         self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
@@ -302,6 +288,18 @@ class TinyPatchLM(nn.Module):
             dropout=float(dropout if patcher_dropout is None else patcher_dropout),
             pos_encoding=patcher_pos_encoding,
         )
+        self.patcher2 = PatcherAutoencoder(
+            in_dim=d_model,
+            latent_dim=patcher2_latent_dim,
+            out_dim=d_model,
+            patch_size=patcher2_patch_size,
+            seq_len=seq_len,
+            encoder_layers=patcher2_encoder_layers,
+            decoder_layers=patcher2_decoder_layers,
+            n_heads=int(patcher2_heads or n_heads),
+            dropout=float(dropout if patcher2_dropout is None else patcher2_dropout),
+            pos_encoding=patcher2_pos_encoding,
+        )
 
         self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(n_layers)])
         self.ln_f = nn.LayerNorm(d_model)
@@ -322,6 +320,11 @@ class TinyPatchLM(nn.Module):
         state = ckpt["patcher"] if isinstance(ckpt, dict) and "patcher" in ckpt else ckpt
         self.patcher.load_state_dict(state)
 
+    def load_patcher2_checkpoint(self, path: str | Path, map_location: torch.device | str | None = None) -> None:
+        ckpt = torch.load(Path(path), map_location=map_location)
+        state = ckpt["patcher2"] if isinstance(ckpt, dict) and "patcher2" in ckpt else ckpt
+        self.patcher2.load_state_dict(state)
+
     def forward(self, x: torch.Tensor, targets: torch.Tensor | None = None):
         _, token_t = x.shape
         if token_t > self.seq_len:
@@ -329,21 +332,21 @@ class TinyPatchLM(nn.Module):
 
         amp_enabled = self.use_amp and (x.device.type == "cuda")
         with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=self.amp_dtype):
-            token_hidden = self.token_emb(x)
+            h = self.token_emb(x)
             if self.token_pos_emb is not None:
                 pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
-                token_hidden = token_hidden + self.token_pos_emb(pos)
+                h = h + self.token_pos_emb(pos)
 
-            patch_fused, _ = self.patcher(token_hidden)
+            h, _ = self.patcher(h)
+            h, _ = self.patcher2(h)
 
             rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
             rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
-            token_hidden = patch_fused
             for block in self.blocks:
-                token_hidden = block(token_hidden, rope_cos=rope_cos, rope_sin=rope_sin)
+                h = block(h, rope_cos=rope_cos, rope_sin=rope_sin)
 
-            token_hidden = self.ln_f(token_hidden)
-            logits = self.lm_head(token_hidden)
+            h = self.ln_f(h)
+            logits = self.lm_head(h)
 
         loss = None
         if targets is not None:

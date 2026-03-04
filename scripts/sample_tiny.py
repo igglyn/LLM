@@ -35,10 +35,17 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher_decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
         patcher_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
         patcher_dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
+        patcher_pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        patcher2_patch_size=int(cfg.get("patcher2", {}).get("patch_size", 2)),
+        patcher2_latent_dim=int(cfg.get("patcher2", {}).get("latent_dim", model_cfg["d_model"])),
+        patcher2_encoder_layers=int(cfg.get("patcher2", {}).get("encoder_layers", 2)),
+        patcher2_decoder_layers=int(cfg.get("patcher2", {}).get("decoder_layers", 2)),
+        patcher2_heads=int(cfg.get("patcher2", {}).get("n_heads", model_cfg["n_heads"])),
+        patcher2_dropout=float(cfg.get("patcher2", {}).get("dropout", model_cfg["dropout"])),
+        patcher2_pos_encoding=str(cfg.get("patcher2", {}).get("pos_encoding", "learned")),
         use_amp=bool(cfg.get("train", {}).get("amp_enabled", True)),
         amp_dtype=str(cfg.get("train", {}).get("amp_dtype", "float16")),
         pos_encoding=str(model_cfg.get("pos_encoding", "learned")),
-        patcher_pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
     ).to(device)
 
 

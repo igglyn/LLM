@@ -18,13 +18,19 @@ pip install -r requirements.txt
 python scripts/prepare_data.py --config configs/tiny.yaml
 ```
 
-4. Pretrain patcher/unpatcher (compression stage):
+4. Pretrain first patcher/unpatcher (tokens -> patches):
 
 ```bash
 python scripts/train_patcher.py --config configs/tiny.yaml
 ```
 
-5. Train tiny LM (optionally loading/freezeing pretrained patcher from config):
+5. Pretrain second stacked patcher (patches -> larger patches):
+
+```bash
+python scripts/train_patcher2.py --config configs/tiny.yaml
+```
+
+6. Train tiny LM (optionally loading/freezeing pretrained patcher from config):
 
 ```bash
 python scripts/train_tiny.py --config configs/tiny.yaml
@@ -36,7 +42,7 @@ Resume training from a checkpoint named like `step_<N>.pt` (also accepts `best.p
 python scripts/train_tiny.py --config configs/tiny.yaml --checkpoint outputs/step_200.pt
 ```
 
-6. Sample (`sample.max_new_patches` controls generation horizon in patch units):
+7. Sample (`sample.max_new_patches` controls generation horizon in patch units):
 
 ```bash
 python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
