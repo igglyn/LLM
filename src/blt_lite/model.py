@@ -77,8 +77,18 @@ class CausalSelfAttention(nn.Module):
         if block_attention:
             if block_size <= 0:
                 raise ValueError("block_size must be > 0 when block attention is enabled")
-            attn_mask = self._block_causal_mask(q.size(-2), q.device, q.dtype, block_size)
+            attn_mask = self._block_causal_mask(q.size(-2), q.device, torch.float32, block_size)
             is_causal = False
+
+        def _sdpa_math_fallback() -> torch.Tensor:
+            attention_ns = getattr(torch.nn, "attention", None)
+            sdpa_kernel = getattr(attention_ns, "sdpa_kernel", None) if attention_ns is not None else None
+            sdp_backend = getattr(attention_ns, "SDPBackend", None) if attention_ns is not None else None
+            if sdpa_kernel is not None and sdp_backend is not None and q.device.type == "cuda":
+                with sdpa_kernel(backends=[sdp_backend.MATH]):
+                    return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+
         if self.use_flash_attention and q.device.type == "cuda":
             attention_ns = getattr(torch.nn, "attention", None)
             sdpa_kernel = getattr(attention_ns, "sdpa_kernel", None) if attention_ns is not None else None
@@ -89,9 +99,14 @@ class CausalSelfAttention(nn.Module):
                     sdp_backend.EFFICIENT_ATTENTION,
                     sdp_backend.MATH,
                 ]
-                with sdpa_kernel(backends=backends):
-                    return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+                try:
+                    with sdpa_kernel(backends=backends):
+                        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+                except RuntimeError as err:
+                    if "scaled_dot_product_attention" not in str(err) and "No available kernel" not in str(err):
+                        raise
+                    return _sdpa_math_fallback()
+        return _sdpa_math_fallback()
 
     def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None, block_attention: bool = False, block_size: int = 8) -> torch.Tensor:
         bsz, t, d_model = x.shape
