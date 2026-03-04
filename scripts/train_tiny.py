@@ -92,23 +92,23 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
 def _maybe_load_pretrained_patcher(model: TinyPatchLM, cfg: dict, device: torch.device) -> None:
     patcher_cfg = cfg.get("patcher", {})
     path = patcher_cfg.get("pretrained_path", "")
-    if path:
-        model.load_patcher_checkpoint(path, map_location=device)
-        print(f"Loaded pretrained patcher from {path}")
-    if bool(patcher_cfg.get("freeze", False)):
-        for p in model.patcher.parameters():
-            p.requires_grad = False
-        print("Froze patcher parameters")
+    if not path:
+        raise ValueError("patcher.pretrained_path must be set for tiny LM training (patcher is always frozen).")
+    model.load_patcher_checkpoint(path, map_location=device)
+    print(f"Loaded pretrained patcher from {path}")
+    for p in model.patcher.parameters():
+        p.requires_grad = False
+    print("Froze patcher parameters")
 
     patcher2_cfg = cfg.get("patcher2", {})
     path2 = patcher2_cfg.get("pretrained_path", "")
-    if path2:
-        model.load_patcher2_checkpoint(path2, map_location=device)
-        print(f"Loaded pretrained second patcher from {path2}")
-    if bool(patcher2_cfg.get("freeze", False)):
-        for p in model.patcher2.parameters():
-            p.requires_grad = False
-        print("Froze second patcher parameters")
+    if not path2:
+        raise ValueError("patcher2.pretrained_path must be set for tiny LM training (patcher2 is always frozen).")
+    model.load_patcher2_checkpoint(path2, map_location=device)
+    print(f"Loaded pretrained second patcher from {path2}")
+    for p in model.patcher2.parameters():
+        p.requires_grad = False
+    print("Froze second patcher parameters")
 
 
 def _token_seq_len_from_cfg(cfg: dict) -> int:
@@ -134,7 +134,7 @@ def main():
 
     device = get_device()
     out_dir = ensure_dir(tcfg.get("out_dir", "outputs"))
-    processed_dir = Path(cfg["data"].get("processed_dir_tiny", cfg["data"]["processed_dir"]))
+    processed_dir = Path(cfg["data"]["processed_dir_tiny"])
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     resume_ckpt = None

@@ -32,7 +32,6 @@ patcher:
   grad_checkpointing: false
   flash_attention: true
   pretrained_path: ""
-  freeze: false
 
 
 patcher2:
@@ -46,7 +45,6 @@ patcher2:
   grad_checkpointing: false
   flash_attention: true
   pretrained_path: ""
-  freeze: false
 
 patcher2_train:
   seq_len_tokens: 1024

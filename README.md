@@ -42,7 +42,7 @@ python scripts/train_patcher2.py --config configs/tiny.yaml
 python scripts/prepare_data_tiny.py --config configs/tiny.yaml
 ```
 
-8. Train tiny LM (optionally loading/freezing pretrained patcher from config):
+8. Train tiny LM (requires pretrained patcher and patcher2 checkpoints from config; both are always frozen):
 
 ```bash
 python scripts/train_tiny.py --config configs/tiny.yaml
@@ -63,6 +63,7 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 ## Notes
 
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens. Data preparation is patch-agnostic; patching happens inside model/patcher modules.
+- Training scripts consume only staged prepared directories: `data.processed_dir_patcher`, `data.processed_dir_patcher2`, and `data.processed_dir_tiny` (no fallback to base processed dir).
 - Patcher and unpatcher are fully isolated in `PatcherAutoencoder` (`PatchEncoder` + `PatchDecoder`). They can be pretrained first with reconstruction loss and then plugged into `TinyPatchLM`.
 - Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both LM training and patcher pretraining use AdamW; patcher pretraining can reduce LR automatically once `patcher_train.lr_reduce_threshold` is reached.
 - Patcher stage sequence lengths are independently configurable with `patcher_train.seq_len_tokens` and `patcher2_train.seq_len_tokens`, so each patcher can train on its own context budget instead of inheriting full LM token context.

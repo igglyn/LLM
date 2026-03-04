@@ -77,7 +77,7 @@ def main():
     set_seed(int(cfg["train"].get("seed", 42)))
 
     device = get_device()
-    processed_dir = Path(cfg["data"].get("processed_dir_patcher", cfg["data"]["processed_dir"]))
+    processed_dir = Path(cfg["data"]["processed_dir_patcher"])
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     patcher_train = cfg.get("patcher_train", {})
