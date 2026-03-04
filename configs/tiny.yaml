@@ -31,6 +31,8 @@ patcher:
   dropout: 0.1
   grad_checkpointing: false
   flash_attention: true
+  block_attention: false
+  block_size: 8
   pretrained_path: ""
 
 
@@ -44,6 +46,8 @@ patcher2:
   dropout: 0.1
   grad_checkpointing: false
   flash_attention: true
+  block_attention: false
+  block_size: 8
   pretrained_path: ""
 
 patcher2_train:

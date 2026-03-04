@@ -71,6 +71,7 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Main model AMP behavior is configurable under `train` (`amp_enabled`, `amp_dtype`) and is applied inside `TinyPatchLM` forward for CUDA runs.
 - Patcher AMP is independently configurable via `patcher_train.amp_enabled` and `patcher_train.amp_dtype`.
 - Gradient checkpointing and flash attention toggles are configurable per module: `model.grad_checkpointing`/`model.flash_attention`, `patcher.grad_checkpointing`/`patcher.flash_attention`, and `patcher2.grad_checkpointing`/`patcher2.flash_attention`.
+- Block attention is configurable per patcher with `patcher.block_attention`/`patcher.block_size` and `patcher2.block_attention`/`patcher2.block_size` (default block size `8`); enabling it allows full attention within each block while remaining causal across blocks, trading memory/throughput against local parallelism.
 - Positional encoding mode is configurable with `model.pos_encoding: `learned | rope`; RoPE rotates attention Q/K only and uses precomputed cos/sin caches up to max sequence length.
 - Patcher positional encoding is also configurable via `patcher.pos_encoding: learned | rope`, applying the same Q/K-only RoPE option in patch encoder/decoder self-attention.
 - Sequence length is configured under `model.seq_len` as large-patch context length; effective token context is derived as `model.seq_len * patcher.patch_size * patcher2.patch_size` for training and generation.

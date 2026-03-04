@@ -65,6 +65,8 @@ def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
         pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
         grad_checkpointing=bool(p2cfg.get("grad_checkpointing", False)),
         flash_attention=bool(p2cfg.get("flash_attention", True)),
+        block_attention=bool(p2cfg.get("block_attention", False)),
+        block_size=int(p2cfg.get("block_size", 8)),
     ).to(device)
     return p2
 

@@ -48,6 +48,8 @@ def _build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.devic
         pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
         grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
         flash_attention=bool(patcher_cfg.get("flash_attention", True)),
+        block_attention=bool(patcher_cfg.get("block_attention", False)),
+        block_size=int(patcher_cfg.get("block_size", 8)),
     ).to(device)
     return emb, p1, d_model, seq_len
 

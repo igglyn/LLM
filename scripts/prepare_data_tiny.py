@@ -49,6 +49,8 @@ def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.dev
         pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
         grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
         flash_attention=bool(patcher_cfg.get("flash_attention", True)),
+        block_attention=bool(patcher_cfg.get("block_attention", False)),
+        block_size=int(patcher_cfg.get("block_size", 8)),
     ).to(device)
     p2 = PatcherAutoencoder(
         in_dim=d_model,
@@ -63,6 +65,8 @@ def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.dev
         pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
         grad_checkpointing=bool(p2cfg.get("grad_checkpointing", False)),
         flash_attention=bool(p2cfg.get("flash_attention", True)),
+        block_attention=bool(p2cfg.get("block_attention", False)),
+        block_size=int(p2cfg.get("block_size", 8)),
     ).to(device)
     return emb, p1, p2, d_model, seq_len
 

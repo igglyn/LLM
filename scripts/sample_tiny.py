@@ -51,6 +51,10 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher2_grad_checkpointing=bool(cfg.get("patcher2", {}).get("grad_checkpointing", False)),
         patcher_flash_attention=bool(patcher_cfg.get("flash_attention", True)),
         patcher2_flash_attention=bool(cfg.get("patcher2", {}).get("flash_attention", True)),
+        patcher_block_attention=bool(patcher_cfg.get("block_attention", False)),
+        patcher_block_size=int(patcher_cfg.get("block_size", 8)),
+        patcher2_block_attention=bool(cfg.get("patcher2", {}).get("block_attention", False)),
+        patcher2_block_size=int(cfg.get("patcher2", {}).get("block_size", 8)),
     ).to(device)
 
 

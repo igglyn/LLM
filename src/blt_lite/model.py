@@ -39,13 +39,15 @@ def _run_block_with_optional_checkpoint(
     rope_cos: torch.Tensor | None,
     rope_sin: torch.Tensor | None,
     grad_checkpointing: bool,
+    block_attention: bool = False,
+    block_size: int = 8,
 ) -> torch.Tensor:
     if grad_checkpointing and x.requires_grad:
         def _forward(inp: torch.Tensor) -> torch.Tensor:
-            return block(inp, rope_cos=rope_cos, rope_sin=rope_sin)
+            return block(inp, rope_cos=rope_cos, rope_sin=rope_sin, block_attention=block_attention, block_size=block_size)
 
         return checkpoint(_forward, x, use_reentrant=False)
-    return block(x, rope_cos=rope_cos, rope_sin=rope_sin)
+    return block(x, rope_cos=rope_cos, rope_sin=rope_sin, block_attention=block_attention, block_size=block_size)
 
 
 class CausalSelfAttention(nn.Module):
@@ -60,8 +62,23 @@ class CausalSelfAttention(nn.Module):
         self.dropout = dropout
         self.use_flash_attention = use_flash_attention
 
-    def _attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def _block_causal_mask(self, t: int, device: torch.device, dtype: torch.dtype, block_size: int) -> torch.Tensor:
+        pos = torch.arange(t, device=device)
+        same_block = torch.div(pos.unsqueeze(1), block_size, rounding_mode="floor") == torch.div(pos.unsqueeze(0), block_size, rounding_mode="floor")
+        causal = pos.unsqueeze(1) >= pos.unsqueeze(0)
+        allowed = same_block | causal
+        mask = torch.full((t, t), float("-inf"), device=device, dtype=dtype)
+        return mask.masked_fill(allowed, 0.0)
+
+    def _attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, block_attention: bool = False, block_size: int = 8) -> torch.Tensor:
         dropout_p = self.dropout if self.training else 0.0
+        attn_mask = None
+        is_causal = True
+        if block_attention:
+            if block_size <= 0:
+                raise ValueError("block_size must be > 0 when block attention is enabled")
+            attn_mask = self._block_causal_mask(q.size(-2), q.device, q.dtype, block_size)
+            is_causal = False
         if self.use_flash_attention and q.device.type == "cuda":
             attention_ns = getattr(torch.nn, "attention", None)
             sdpa_kernel = getattr(attention_ns, "sdpa_kernel", None) if attention_ns is not None else None
@@ -73,10 +90,10 @@ class CausalSelfAttention(nn.Module):
                     sdp_backend.MATH,
                 ]
                 with sdpa_kernel(backends=backends):
-                    return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True)
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True)
+                    return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
 
-    def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None, block_attention: bool = False, block_size: int = 8) -> torch.Tensor:
         bsz, t, d_model = x.shape
         qkv = self.qkv(x).view(bsz, t, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
@@ -93,7 +110,7 @@ class CausalSelfAttention(nn.Module):
             sin = sin.to(device=x.device, dtype=q.dtype)
             q, k = _apply_rope(q, k, cos, sin)
 
-        out = self._attention(q, k, v)
+        out = self._attention(q, k, v, block_attention=block_attention, block_size=block_size)
         out = out.transpose(1, 2).contiguous().view(bsz, t, d_model)
         return self.out_proj(out)
 
@@ -112,8 +129,15 @@ class TransformerBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor, rope_cos: torch.Tensor | None = None, rope_sin: torch.Tensor | None = None) -> torch.Tensor:
-        x = x + self.attn(self.ln_1(x), rope_cos=rope_cos, rope_sin=rope_sin)
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cos: torch.Tensor | None = None,
+        rope_sin: torch.Tensor | None = None,
+        block_attention: bool = False,
+        block_size: int = 8,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x), rope_cos=rope_cos, rope_sin=rope_sin, block_attention=block_attention, block_size=block_size)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -131,11 +155,15 @@ class PatchEncoder(nn.Module):
         pos_encoding: str = "learned",
         grad_checkpointing: bool = False,
         flash_attention: bool = True,
+        block_attention: bool = False,
+        block_size: int = 8,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.max_patch_len = math.ceil(seq_len / patch_size)
         self.grad_checkpointing = grad_checkpointing
+        self.block_attention = block_attention
+        self.block_size = block_size
         self.patch_proj = nn.Linear(in_dim * patch_size, d_model)
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("patcher pos_encoding must be one of: learned, rope")
@@ -175,7 +203,7 @@ class PatchEncoder(nn.Module):
         rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
         rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
         for block in self.blocks:
-            out = _run_block_with_optional_checkpoint(block, out, rope_cos, rope_sin, self.training and self.grad_checkpointing)
+            out = _run_block_with_optional_checkpoint(block, out, rope_cos, rope_sin, self.training and self.grad_checkpointing, block_attention=self.block_attention, block_size=self.block_size)
         return out
 
 
@@ -193,11 +221,15 @@ class PatchDecoder(nn.Module):
         pos_encoding: str = "learned",
         grad_checkpointing: bool = False,
         flash_attention: bool = True,
+        block_attention: bool = False,
+        block_size: int = 8,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.token_seq_len = seq_len
         self.grad_checkpointing = grad_checkpointing
+        self.block_attention = block_attention
+        self.block_size = block_size
         self.query_proj = nn.Linear(token_dim, d_model)
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("patcher pos_encoding must be one of: learned, rope")
@@ -244,7 +276,7 @@ class PatchDecoder(nn.Module):
         rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
         rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
         for block in self.blocks:
-            out = _run_block_with_optional_checkpoint(block, out, rope_cos, rope_sin, self.training and self.grad_checkpointing)
+            out = _run_block_with_optional_checkpoint(block, out, rope_cos, rope_sin, self.training and self.grad_checkpointing, block_attention=self.block_attention, block_size=self.block_size)
         return self.out_proj(out)
 
 
@@ -263,6 +295,8 @@ class PatcherAutoencoder(nn.Module):
         pos_encoding: str = "learned",
         grad_checkpointing: bool = False,
         flash_attention: bool = True,
+        block_attention: bool = False,
+        block_size: int = 8,
     ):
         super().__init__()
         self.token_seq_len = seq_len
@@ -277,6 +311,8 @@ class PatcherAutoencoder(nn.Module):
             pos_encoding=pos_encoding,
             grad_checkpointing=grad_checkpointing,
             flash_attention=flash_attention,
+            block_attention=block_attention,
+            block_size=block_size,
         )
         self.decoder = PatchDecoder(
             token_dim=in_dim,
@@ -290,6 +326,8 @@ class PatcherAutoencoder(nn.Module):
             pos_encoding=pos_encoding,
             grad_checkpointing=grad_checkpointing,
             flash_attention=flash_attention,
+            block_attention=block_attention,
+            block_size=block_size,
         )
 
     def forward(self, token_hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -330,6 +368,10 @@ class TinyPatchLM(nn.Module):
         patcher2_grad_checkpointing: bool = False,
         patcher_flash_attention: bool = True,
         patcher2_flash_attention: bool = True,
+        patcher_block_attention: bool = False,
+        patcher_block_size: int = 8,
+        patcher2_block_attention: bool = False,
+        patcher2_block_size: int = 8,
     ):
         super().__init__()
         if patch_size <= 0 or patcher2_patch_size <= 0:
@@ -360,6 +402,8 @@ class TinyPatchLM(nn.Module):
             pos_encoding=patcher_pos_encoding,
             grad_checkpointing=patcher_grad_checkpointing,
             flash_attention=patcher_flash_attention,
+            block_attention=patcher_block_attention,
+            block_size=patcher_block_size,
         )
         self.patcher2 = PatcherAutoencoder(
             in_dim=d_model,
@@ -374,6 +418,8 @@ class TinyPatchLM(nn.Module):
             pos_encoding=patcher2_pos_encoding,
             grad_checkpointing=patcher2_grad_checkpointing,
             flash_attention=patcher2_flash_attention,
+            block_attention=patcher2_block_attention,
+            block_size=patcher2_block_size,
         )
 
         self.blocks = nn.ModuleList(
