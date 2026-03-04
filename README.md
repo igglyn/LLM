@@ -18,31 +18,31 @@ pip install -r requirements.txt
 python scripts/prepare_data.py --config configs/tiny.yaml
 ```
 
-4. Prepare explicit stage-2 patcher data artifacts:
-
-```bash
-python scripts/prepare_data_patcher2.py --config configs/tiny.yaml
-```
-
-5. Prepare explicit TinyPatchLM data artifacts:
-
-```bash
-python scripts/prepare_data_tiny.py --config configs/tiny.yaml
-```
-
-6. Pretrain first patcher/unpatcher (tokens -> patches):
+4. Pretrain first patcher/unpatcher (tokens -> patches):
 
 ```bash
 python scripts/train_patcher.py --config configs/tiny.yaml
 ```
 
-7. Pretrain second stacked patcher (patches -> larger patches):
+5. Prepare explicit stage-2 patcher data artifacts:
+
+```bash
+python scripts/prepare_data_patcher2.py --config configs/tiny.yaml
+```
+
+6. Pretrain second stacked patcher (patches -> larger patches):
 
 ```bash
 python scripts/train_patcher2.py --config configs/tiny.yaml
 ```
 
-8. Train tiny LM (optionally loading/freezeing pretrained patcher from config):
+7. Prepare explicit TinyPatchLM data artifacts:
+
+```bash
+python scripts/prepare_data_tiny.py --config configs/tiny.yaml
+```
+
+8. Train tiny LM (optionally loading/freezing pretrained patcher from config):
 
 ```bash
 python scripts/train_tiny.py --config configs/tiny.yaml
