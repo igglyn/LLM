@@ -24,7 +24,7 @@ def build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
     model_cfg = cfg["model"]
     patcher_cfg = cfg["patcher"]
     seq_len = int(cfg["data"]["seq_len"])
-    patch_size = int(getattr(tokenizer, "patch_size", cfg.get("tokenizer", {}).get("patch_size", 1)))
+    patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
     d_model = int(model_cfg["d_model"])
 
     emb = torch.nn.Embedding(tokenizer.vocab_len, d_model).to(device)

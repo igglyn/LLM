@@ -58,7 +58,7 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
     return TinyPatchLM(
         vocab_size=tokenizer.vocab_len,
         seq_len=int(data_cfg["seq_len"]),
-        patch_size=int(getattr(tokenizer, "patch_size", cfg.get("tokenizer", {}).get("patch_size", 1))),
+        patch_size=int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1))),
         d_model=int(model_cfg["d_model"]),
         n_layers=int(model_cfg["n_layers"]),
         n_heads=int(model_cfg["n_heads"]),
