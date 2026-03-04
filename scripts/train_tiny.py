@@ -105,6 +105,13 @@ def _maybe_load_pretrained_patcher(model: TinyPatchLM, cfg: dict, device: torch.
         print("Froze second patcher parameters")
 
 
+def _token_seq_len_from_cfg(cfg: dict) -> int:
+    model_cfg = cfg["model"]
+    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    return int(model_cfg["seq_len"]) * p1 * p2
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -134,7 +141,7 @@ def main():
             tcfg = cfg["train"]
         step = parse_step_from_checkpoint_name(ckpt_path)
 
-    seq_len = int(cfg["model"]["seq_len"])
+    seq_len = _token_seq_len_from_cfg(cfg)
     train_loader, val_loader = build_dataloaders(
         processed_dir / "train_tokens.npy",
         processed_dir / "val_tokens.npy",

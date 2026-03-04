@@ -42,7 +42,7 @@ Resume training from a checkpoint named like `step_<N>.pt` (also accepts `best.p
 python scripts/train_tiny.py --config configs/tiny.yaml --checkpoint outputs/step_200.pt
 ```
 
-7. Sample (`sample.max_new_patches` controls generation horizon in patch units):
+7. Sample (`sample.max_new_patches` controls generation horizon in large-patch units):
 
 ```bash
 python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
@@ -57,6 +57,6 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Patcher AMP is independently configurable via `patcher_train.amp_enabled` and `patcher_train.amp_dtype`.
 - Positional encoding mode is configurable with `model.pos_encoding: `learned | rope`; RoPE rotates attention Q/K only and uses precomputed cos/sin caches up to max sequence length.
 - Patcher positional encoding is also configurable via `patcher.pos_encoding: learned | rope`, applying the same Q/K-only RoPE option in patch encoder/decoder self-attention.
-- Sequence length is configured under `model.seq_len` and used by patcher pretraining, LM training, and sampling contexts.
+- Sequence length is configured under `model.seq_len` as large-patch context length; effective token context is derived as `model.seq_len * patcher.patch_size * patcher2.patch_size` for training and generation.
 - Eval is capped by `train.eval_batches` so validation cost stays bounded as datasets grow.
 - Prioritizes tokenizer coherence and minimal code over model quality.

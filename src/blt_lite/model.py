@@ -148,11 +148,12 @@ class PatchDecoder(nn.Module):
     ):
         super().__init__()
         self.patch_size = patch_size
+        self.token_seq_len = seq_len
         self.query_proj = nn.Linear(token_dim, d_model)
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("patcher pos_encoding must be one of: learned, rope")
         self.pos_encoding = pos_encoding
-        self.token_pos_emb = nn.Embedding(seq_len, d_model) if pos_encoding == "learned" else None
+        self.token_pos_emb = nn.Embedding(self.token_seq_len, d_model) if pos_encoding == "learned" else None
 
         self.cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, dropout=dropout, batch_first=True)
         self.blocks = nn.ModuleList([TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(max(1, n_layers))])
@@ -160,7 +161,7 @@ class PatchDecoder(nn.Module):
 
         if self.pos_encoding == "rope":
             head_dim = d_model // n_heads
-            cos, sin = _build_rope_cache(seq_len, head_dim)
+            cos, sin = _build_rope_cache(self.token_seq_len, head_dim)
             self.register_buffer("rope_cos_cached", cos, persistent=False)
             self.register_buffer("rope_sin_cached", sin, persistent=False)
         else:
@@ -208,6 +209,7 @@ class PatcherAutoencoder(nn.Module):
         pos_encoding: str = "learned",
     ):
         super().__init__()
+        self.token_seq_len = seq_len
         self.encoder = PatchEncoder(
             in_dim=in_dim,
             d_model=latent_dim,
@@ -215,7 +217,7 @@ class PatcherAutoencoder(nn.Module):
             n_layers=encoder_layers,
             dropout=dropout,
             patch_size=patch_size,
-            seq_len=seq_len,
+            seq_len=self.token_seq_len,
             pos_encoding=pos_encoding,
         )
         self.decoder = PatchDecoder(
@@ -226,7 +228,7 @@ class PatcherAutoencoder(nn.Module):
             n_layers=decoder_layers,
             dropout=dropout,
             patch_size=patch_size,
-            seq_len=seq_len,
+            seq_len=self.token_seq_len,
             pos_encoding=pos_encoding,
         )
 
@@ -266,7 +268,9 @@ class TinyPatchLM(nn.Module):
         super().__init__()
         if patch_size <= 0 or patcher2_patch_size <= 0:
             raise ValueError("patch sizes must be > 0")
-        self.seq_len = seq_len
+        self.seq_len = seq_len  # large-patch context length
+        self.large_patch_size = patch_size * patcher2_patch_size
+        self.token_seq_len = seq_len * self.large_patch_size
         self.use_amp = use_amp
         self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
         if pos_encoding not in {"learned", "rope"}:
@@ -274,14 +278,14 @@ class TinyPatchLM(nn.Module):
         self.pos_encoding = pos_encoding
 
         self.token_emb = nn.Embedding(vocab_size, d_model)
-        self.token_pos_emb = nn.Embedding(seq_len, d_model) if pos_encoding == "learned" else None
+        self.token_pos_emb = nn.Embedding(self.token_seq_len, d_model) if pos_encoding == "learned" else None
 
         self.patcher = PatcherAutoencoder(
             in_dim=d_model,
             latent_dim=patcher_latent_dim,
             out_dim=d_model,
             patch_size=patch_size,
-            seq_len=seq_len,
+            seq_len=self.token_seq_len,
             encoder_layers=patcher_encoder_layers,
             decoder_layers=patcher_decoder_layers,
             n_heads=int(patcher_heads or n_heads),
@@ -293,7 +297,7 @@ class TinyPatchLM(nn.Module):
             latent_dim=patcher2_latent_dim,
             out_dim=d_model,
             patch_size=patcher2_patch_size,
-            seq_len=seq_len,
+            seq_len=self.token_seq_len,
             encoder_layers=patcher2_encoder_layers,
             decoder_layers=patcher2_decoder_layers,
             n_heads=int(patcher2_heads or n_heads),
@@ -308,7 +312,7 @@ class TinyPatchLM(nn.Module):
 
         if self.pos_encoding == "rope":
             head_dim = d_model // n_heads
-            cos, sin = _build_rope_cache(seq_len, head_dim)
+            cos, sin = _build_rope_cache(self.token_seq_len, head_dim)
             self.register_buffer("rope_cos_cached", cos, persistent=False)
             self.register_buffer("rope_sin_cached", sin, persistent=False)
         else:
@@ -327,8 +331,8 @@ class TinyPatchLM(nn.Module):
 
     def forward(self, x: torch.Tensor, targets: torch.Tensor | None = None):
         _, token_t = x.shape
-        if token_t > self.seq_len:
-            raise ValueError(f"sequence length {token_t} exceeds model limit {self.seq_len}")
+        if token_t > self.token_seq_len:
+            raise ValueError(f"sequence length {token_t} exceeds model token limit {self.token_seq_len} (derived from model.seq_len large patches)")
 
         amp_enabled = self.use_amp and (x.device.type == "cuda")
         with torch.cuda.amp.autocast(enabled=amp_enabled, dtype=self.amp_dtype):
@@ -356,7 +360,7 @@ class TinyPatchLM(nn.Module):
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0, top_k: int = 0):
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.seq_len :]
+            idx_cond = idx[:, -self.token_seq_len :]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / max(1e-5, temperature)
             if top_k > 0:

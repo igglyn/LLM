@@ -23,7 +23,7 @@ from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
 def build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
     model_cfg = cfg["model"]
     patcher_cfg = cfg["patcher"]
-    seq_len = int(cfg["model"]["seq_len"])
+    seq_len = _token_seq_len_from_cfg(cfg)
     patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
     d_model = int(model_cfg["d_model"])
 
@@ -46,7 +46,7 @@ def build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
 def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
     model_cfg = cfg["model"]
     p2cfg = cfg.get("patcher2", {})
-    seq_len = int(cfg["model"]["seq_len"])
+    seq_len = _token_seq_len_from_cfg(cfg)
     d_model = int(model_cfg["d_model"])
     p2 = PatcherAutoencoder(
         in_dim=d_model,
@@ -61,6 +61,13 @@ def build_stage2(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device
         pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
     ).to(device)
     return p2
+
+
+def _token_seq_len_from_cfg(cfg: dict) -> int:
+    model_cfg = cfg["model"]
+    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    return int(model_cfg["seq_len"]) * p1 * p2
 
 
 def main():
@@ -79,7 +86,7 @@ def main():
     train_loader, val_loader = build_dataloaders(
         processed_dir / "train_tokens.npy",
         processed_dir / "val_tokens.npy",
-        seq_len=int(cfg["model"]["seq_len"]),
+        seq_len=_token_seq_len_from_cfg(cfg),
         batch_size=int(p2train.get("batch_size", cfg["train"]["batch_size"])),
     )
 

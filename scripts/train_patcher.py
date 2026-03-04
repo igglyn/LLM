@@ -23,7 +23,7 @@ from torch.optim import AdamW
 def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
     model_cfg = cfg["model"]
     patcher_cfg = cfg["patcher"]
-    seq_len = int(cfg["model"]["seq_len"])
+    seq_len = _token_seq_len_from_cfg(cfg)
     patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
     d_model = int(model_cfg["d_model"])
 
@@ -59,6 +59,13 @@ def maybe_reduce_lr_by_threshold(optimizer, val_loss: float, patcher_train: dict
     return True
 
 
+def _token_seq_len_from_cfg(cfg: dict) -> int:
+    model_cfg = cfg["model"]
+    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
+    p2 = int(cfg.get("patcher2", {}).get("patch_size", 2))
+    return int(model_cfg["seq_len"]) * p1 * p2
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -75,7 +82,7 @@ def main():
     train_loader, val_loader = build_dataloaders(
         processed_dir / "train_tokens.npy",
         processed_dir / "val_tokens.npy",
-        seq_len=int(cfg["model"]["seq_len"]),
+        seq_len=_token_seq_len_from_cfg(cfg),
         batch_size=int(patcher_train.get("batch_size", cfg["train"]["batch_size"])),
     )
 

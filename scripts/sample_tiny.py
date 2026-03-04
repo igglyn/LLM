@@ -48,6 +48,7 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
     ).to(device)
 
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -77,11 +78,11 @@ def main():
     token_ids = tokenizer.encode(args.prompt, add_bos=True, add_eos=False)
     idx = torch.tensor([token_ids], dtype=torch.long, device=device)
 
-    patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
+    large_patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1))) * int(cfg.get("patcher2", {}).get("patch_size", 2))
     max_new_patches = int(cfg["sample"]["max_new_patches"])
     out = model.generate(
         idx,
-        max_new_tokens=max_new_patches * patch_size,
+        max_new_tokens=max_new_patches * large_patch_size,
         temperature=float(cfg["sample"]["temperature"]),
         top_k=int(cfg["sample"]["top_k"]),
     )
