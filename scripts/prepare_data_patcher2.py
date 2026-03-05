@@ -67,11 +67,9 @@ def _build_stage1(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.devic
     return emb, p1, d_model, seq_len
 
 
-def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, patcher: PatcherAutoencoder, seq_len: int, device: torch.device, out_path: Path, d_model: int, debug_token_match: bool = False) -> tuple[int, int]:
+def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, patcher: PatcherAutoencoder, seq_len: int, device: torch.device, out_path: Path, d_model: int):
     hidden = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float16, shape=(len(tokens), d_model))
     chunk = max(seq_len, 1)
-    matched_total = 0
-    unmatched_total = 0
     with torch.no_grad():
         for start in range(0, len(tokens), chunk):
             end = min(len(tokens), start + chunk)
@@ -84,26 +82,15 @@ def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, patcher: Patcher
                 token_hidden = emb(x)
                 recon_hidden, _ = patcher(token_hidden)
             take_from = start - ctx_start
-            recon_slice = recon_hidden[:, take_from:, :]
-            if debug_token_match:
-                logits = torch.matmul(recon_slice, emb.weight.transpose(0, 1))
-                pred = logits.argmax(dim=-1)
-                target = x[:, take_from:]
-                matched = int((pred == target).sum().item())
-                total = int(pred.numel())
-                matched_total += matched
-                unmatched_total += (total - matched)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            hidden[start:end] = recon_slice.squeeze(0).to(torch.float16).cpu().numpy()
+            hidden[start:end] = recon_hidden[:, take_from:, :].squeeze(0).to(torch.float16).cpu().numpy()
     hidden.flush()
-    return matched_total, unmatched_total
 
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare explicit stage-2 (patcher2) training artifacts with cached stage-1 hidden states.")
     parser.add_argument("--config", required=True)
-    parser.add_argument("--debug-token-match", action="store_true", help="Print matched/unmatched token ratio while generating stage1 hidden cache")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -133,8 +120,8 @@ def main():
 
     train_tokens = np.load(out_dir / "train_tokens.npy")
     val_tokens = np.load(out_dir / "val_tokens.npy")
-    train_match, train_unmatch = _encode_stream(train_tokens, emb, patcher1, seq_len, device, out_dir / "train_stage1_hidden.npy", d_model, debug_token_match=args.debug_token_match)
-    val_match, val_unmatch = _encode_stream(val_tokens, emb, patcher1, seq_len, device, out_dir / "val_stage1_hidden.npy", d_model, debug_token_match=args.debug_token_match)
+    _encode_stream(train_tokens, emb, patcher1, seq_len, device, out_dir / "train_stage1_hidden.npy", d_model)
+    _encode_stream(val_tokens, emb, patcher1, seq_len, device, out_dir / "val_stage1_hidden.npy", d_model)
 
     summary = {
         "source_dir": str(source_dir),
@@ -145,14 +132,6 @@ def main():
         "val_stage1_hidden": "val_stage1_hidden.npy",
         "seq_len_tokens": int(cfg.get("patcher2_train", {}).get("seq_len_tokens", 0)),
     }
-    if args.debug_token_match:
-        summary["train_token_match"] = int(train_match)
-        summary["train_token_unmatch"] = int(train_unmatch)
-        summary["val_token_match"] = int(val_match)
-        summary["val_token_unmatch"] = int(val_unmatch)
-        summary["train_match_unmatch_ratio"] = float(train_match) / float(max(train_unmatch, 1))
-        summary["val_match_unmatch_ratio"] = float(val_match) / float(max(val_unmatch, 1))
-
     with open(out_dir / "stage_info.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 

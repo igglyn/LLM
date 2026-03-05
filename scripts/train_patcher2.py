@@ -110,7 +110,8 @@ def main():
 
     seq_len = _token_seq_len_from_cfg(cfg)
     train_hidden = processed_dir / "train_stage1_hidden.npy"
-    if not train_hidden.exists():
+    val_hidden = processed_dir / "val_stage1_hidden.npy"
+    if not train_hidden.exists() or not val_hidden.exists():
         raise FileNotFoundError("Missing cached stage1 hidden states. Run scripts/prepare_data_patcher2.py first.")
 
     p2train = cfg.get("patcher2_train", {})
@@ -120,7 +121,12 @@ def main():
         shuffle=True,
         drop_last=True,
     )
-
+    val_loader = DataLoader(
+        HiddenReconstructionDataset(val_hidden, seq_len),
+        batch_size=int(p2train.get("batch_size", cfg["train"]["batch_size"])),
+        shuffle=False,
+        drop_last=False,
+    )
 
     patcher2 = build_stage2(cfg, tokenizer, device)
 
@@ -136,12 +142,14 @@ def main():
     out_dir = ensure_dir(p2train.get("out_dir", "outputs/patcher2"))
     max_steps = int(p2train.get("max_steps", 3000))
     eval_every = int(p2train.get("eval_every", 100))
+    eval_batches = int(p2train.get("eval_batches", 50))
     save_every = int(p2train.get("save_every", 200))
 
     def batch_loss(h: torch.Tensor) -> torch.Tensor:
         recon, _ = patcher2(h)
         return torch.nn.functional.mse_loss(recon, h)
 
+    best_val = float("inf")
     step = 0
     lr_reduction_state: dict[int, bool] = {}
     patcher2.train()
@@ -161,7 +169,22 @@ def main():
                 print(f"patcher2_step={step} recon_loss={loss.item():.6f}")
 
             if step % eval_every == 0 and step > 0:
-                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, float(loss.item()), p2train, lr_reduction_state)
+                patcher2.eval()
+                losses = []
+                with torch.no_grad():
+                    for vh, _ in val_loader:
+                        vh = vh.to(device)
+                        with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
+                            losses.append(batch_loss(vh).item())
+                        if len(losses) >= eval_batches:
+                            break
+                val_loss = float(sum(losses) / max(1, len(losses)))
+                print(f"patcher2_step={step} val_recon_loss={val_loss:.6f}")
+                if val_loss < best_val:
+                    best_val = val_loss
+                    torch.save({"patcher2": patcher2.state_dict(), "config": cfg}, out_dir / "best.pt")
+                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, val_loss, p2train, lr_reduction_state)
+                patcher2.train()
 
             if step % save_every == 0 and step > 0:
                 torch.save({"patcher2": patcher2.state_dict(), "config": cfg}, out_dir / f"step_{step}.pt")

@@ -69,7 +69,6 @@ python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 - Patcher architecture and training knobs are configurable under `patcher` and `patcher_train` in the YAML config. Both LM training and patcher pretraining use AdamW; patcher pretraining can reduce LR automatically at up to two validation-loss milestones (`patcher_train.lr_reduce_threshold`, `patcher_train.lr_reduce_threshold_2`).
 - Patcher stage sequence lengths are independently configurable with `patcher_train.seq_len_tokens` and `patcher2_train.seq_len_tokens`, so each patcher can train on its own context budget instead of inheriting full LM token context.
 - Patcher2 pretraining supports the same dual loss-threshold LR drops via `patcher2_train.lr_reduce_threshold` and `patcher2_train.lr_reduce_threshold_2`.
-- For patcher debugging during dataset generation, `prepare_data_patcher2.py --debug-token-match` reports matched vs unmatched token ratios while producing stage-1 hidden caches.
 - `patcher2.enabled` can disable the second patcher stage entirely; when disabled, stage-2 training can be skipped and effective large-patch size becomes just `patcher.patch_size`.
 - Main LM training supports the same two-threshold LR drop behavior (`train.lr_reduce_threshold`, `train.lr_reduce_threshold_2`) in addition to warmup-cosine scheduling.
 - Main model AMP behavior is configurable under `train` (`amp_enabled`, `amp_dtype`) and is applied inside `TinyPatchLM` forward for CUDA runs.
