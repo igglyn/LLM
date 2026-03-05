@@ -73,8 +73,11 @@ def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, patcher: Patcher
     with torch.no_grad():
         for start in range(0, len(tokens), chunk):
             end = min(len(tokens), start + chunk)
-            ctx_start = max(0, start - seq_len + 1)
-            x = torch.from_numpy(tokens[ctx_start:end].astype(np.int64)).unsqueeze(0).to(device)
+            ctx_start = max(0, end - seq_len)
+            chunk_tokens = tokens[ctx_start:end].astype(np.int64)
+            if chunk_tokens.size > seq_len:
+                raise ValueError(f"Internal error: chunk length {chunk_tokens.size} exceeds seq_len {seq_len}")
+            x = torch.from_numpy(chunk_tokens).unsqueeze(0).to(device)
             with _sdpa_math_context(device):
                 token_hidden = emb(x)
                 recon_hidden, _ = patcher(token_hidden)
