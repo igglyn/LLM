@@ -60,6 +60,22 @@ python scripts/train_tiny.py --config configs/tiny.yaml --checkpoint outputs/ste
 python scripts/sample_tiny.py --config configs/tiny.yaml --prompt "Hello"
 ```
 
+10. Compare precomputed hidden caches vs online frozen patcher path (useful for checking cache drift/quantization effects):
+
+```bash
+python scripts/compare_precomputed_vs_online.py --config configs/tiny.yaml --split train --samples 4
+```
+
+By default this script expects `patcher2.enabled: false` (one patcher feeding the main model), and reports per-sample hidden/logit/loss deltas between online path and precomputed caches.
+
+11. Clean generated processed/output artifacts to avoid pollution between runs:
+
+```bash
+python scripts/clean_artifacts.py --config configs/tiny.yaml
+```
+
+Use `--dry-run` to preview deletions and `--include-raw` if you also want to remove `data.raw_path`.
+
 ## Notes
 
 - Tokenization is byte-identity (raw UTF-8 bytes map to token IDs 0..255) with BOS/EOS special tokens. Data preparation is patch-agnostic; patching happens inside model/patcher modules.

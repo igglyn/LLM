@@ -47,28 +47,6 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
     return emb, patcher
 
 
-def maybe_reduce_lr_by_thresholds(optimizer, val_loss: float, patcher_train: dict, reduction_state: dict) -> dict:
-    thresholds = [
-        ("lr_reduce_threshold", "lr_reduce_factor"),
-        ("lr_reduce_threshold_2", "lr_reduce_factor_2"),
-    ]
-    lr_min = float(patcher_train.get("lr_min", 1e-6))
-    for idx, (thr_key, fac_key) in enumerate(thresholds):
-        if reduction_state.get(idx, False):
-            continue
-        threshold = patcher_train.get(thr_key)
-        if threshold is None or val_loss > float(threshold):
-            continue
-
-        factor = float(patcher_train.get(fac_key, patcher_train.get("lr_reduce_factor", 0.5)))
-        for group in optimizer.param_groups:
-            old_lr = float(group["lr"])
-            group["lr"] = max(lr_min, old_lr * factor)
-            print(f"Reduced patcher LR via {thr_key}: {old_lr:.8f} -> {group['lr']:.8f}")
-        reduction_state[idx] = True
-    return reduction_state
-
-
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
@@ -89,7 +67,7 @@ def main():
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     patcher_train = cfg.get("patcher_train", {})
-    train_loader, val_loader = build_dataloaders(
+    train_loader, _ = build_dataloaders(
         processed_dir / "train_tokens.npy",
         processed_dir / "val_tokens.npy",
         seq_len=_token_seq_len_from_cfg(cfg),
@@ -109,7 +87,6 @@ def main():
 
     out_dir = ensure_dir(patcher_train.get("out_dir", "outputs/patcher"))
     max_steps = int(patcher_train.get("max_steps", 3000))
-    eval_every = int(patcher_train.get("eval_every", 100))
     save_every = int(patcher_train.get("save_every", 200))
 
     def batch_loss(x: torch.Tensor) -> torch.Tensor:
@@ -117,9 +94,7 @@ def main():
         recon_hidden, _ = patcher(token_hidden)
         return torch.nn.functional.mse_loss(recon_hidden, token_hidden)
 
-    best_val = float("inf")
     step = 0
-    lr_reduction_state: dict[int, bool] = {}
     patcher.train()
     token_emb.train()
     while step < max_steps:
@@ -138,27 +113,6 @@ def main():
 
             if step % 20 == 0:
                 print(f"patcher_step={step} recon_loss={loss.item():.6f}")
-
-            if step % eval_every == 0 and step > 0:
-                patcher.eval(); token_emb.eval()
-                losses = []
-                with torch.no_grad():
-                    for vx, _ in val_loader:
-                        vx = vx.to(device)
-                        with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and patcher_amp_enabled), dtype=patcher_amp_dtype):
-                            losses.append(batch_loss(vx).item())
-                        if len(losses) >= int(patcher_train.get("eval_batches", 50)):
-                            break
-                val_loss = float(sum(losses) / max(1, len(losses)))
-                print(f"patcher_step={step} val_recon_loss={val_loss:.6f}")
-                if val_loss < best_val:
-                    best_val = val_loss
-                    torch.save(
-                        {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
-                        out_dir / "best.pt",
-                    )
-                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, val_loss, patcher_train, lr_reduction_state)
-                patcher.train(); token_emb.train()
 
             if step % save_every == 0 and step > 0:
                 torch.save(
