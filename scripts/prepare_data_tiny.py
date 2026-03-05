@@ -22,8 +22,6 @@ from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.utils import ensure_dir, get_device, load_config
 
 
-
-
 def _sdpa_math_context(device: torch.device):
     if device.type != "cuda":
         return contextlib.nullcontext()
@@ -33,6 +31,7 @@ def _sdpa_math_context(device: torch.device):
     if sdpa_kernel is None or sdp_backend is None:
         return contextlib.nullcontext()
     return sdpa_kernel(backends=[sdp_backend.MATH])
+
 
 def _token_seq_len_from_cfg(cfg: dict) -> int:
     model_cfg = cfg["model"]
@@ -87,9 +86,28 @@ def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.dev
     return emb, p1, p2, d_model, seq_len
 
 
-def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoencoder, p2: PatcherAutoencoder | None, seq_len: int, device: torch.device, out_path: Path, d_model: int):
+def _decode_to_tokens(hidden: torch.Tensor, emb_weight: torch.Tensor) -> torch.Tensor:
+    logits = torch.matmul(hidden, emb_weight.transpose(0, 1))
+    return torch.argmax(logits, dim=-1)
+
+
+def _encode_stream(
+    tokens: np.ndarray,
+    emb: torch.nn.Embedding,
+    p1: PatcherAutoencoder,
+    p2: PatcherAutoencoder | None,
+    seq_len: int,
+    device: torch.device,
+    out_path: Path,
+    d_model: int,
+    verify_token_identity: bool,
+):
     hidden = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float16, shape=(len(tokens), d_model))
     chunk = max(seq_len, 1)
+    stage1_mismatch = 0
+    stage2_mismatch = 0
+    checked_tokens = 0
+    emb_weight = emb.weight
     with torch.no_grad():
         for start in range(0, len(tokens), chunk):
             end = min(len(tokens), start + chunk)
@@ -103,15 +121,30 @@ def _encode_stream(tokens: np.ndarray, emb: torch.nn.Embedding, p1: PatcherAutoe
                 h1, _ = p1(token_hidden)
                 h2 = h1 if p2 is None else p2(h1)[0]
             take_from = start - ctx_start
+            out_hidden = h2[:, take_from:, :]
+            if verify_token_identity:
+                target = x[:, take_from:]
+                stage1_decoded = _decode_to_tokens(h1[:, take_from:, :], emb_weight)
+                stage1_mismatch += int((stage1_decoded != target).sum().item())
+                if p2 is not None:
+                    stage2_decoded = _decode_to_tokens(out_hidden, emb_weight)
+                    stage2_mismatch += int((stage2_decoded != target).sum().item())
+                checked_tokens += int(target.numel())
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            hidden[start:end] = h2[:, take_from:, :].squeeze(0).to(torch.float16).cpu().numpy()
+            hidden[start:end] = out_hidden.squeeze(0).to(torch.float16).cpu().numpy()
     hidden.flush()
+    return {
+        "checked_tokens": checked_tokens,
+        "stage1_mismatch_tokens": stage1_mismatch,
+        "stage2_mismatch_tokens": stage2_mismatch,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare explicit TinyPatchLM token artifacts and cached stage2 hidden states.")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--verify-token-identity", action="store_true", help="Decode reconstructed hidden states back to tokens and assert exact token identity.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -151,14 +184,44 @@ def main():
         if p2 is None:
             raise ValueError("patcher2 enabled but patcher2 model was not constructed")
         p2.load_state_dict(ckpt2["patcher2"] if isinstance(ckpt2, dict) and "patcher2" in ckpt2 else ckpt2)
-    emb.eval(); p1.eval();
+    emb.eval()
+    p1.eval()
     if p2 is not None:
         p2.eval()
 
     train_tokens = np.load(out_dir / "train_tokens.npy")
     val_tokens = np.load(out_dir / "val_tokens.npy")
-    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
-    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
+    train_verify = _encode_stream(
+        train_tokens,
+        emb,
+        p1,
+        p2,
+        seq_len,
+        device,
+        out_dir / "train_stage2_hidden.npy",
+        d_model,
+        verify_token_identity=args.verify_token_identity,
+    )
+    val_verify = _encode_stream(
+        val_tokens,
+        emb,
+        p1,
+        p2,
+        seq_len,
+        device,
+        out_dir / "val_stage2_hidden.npy",
+        d_model,
+        verify_token_identity=args.verify_token_identity,
+    )
+
+    if args.verify_token_identity:
+        total_checked = int(train_verify["checked_tokens"] + val_verify["checked_tokens"])
+        stage1_mismatch = int(train_verify["stage1_mismatch_tokens"] + val_verify["stage1_mismatch_tokens"])
+        stage2_mismatch = int(train_verify["stage2_mismatch_tokens"] + val_verify["stage2_mismatch_tokens"])
+        if stage1_mismatch != 0:
+            raise RuntimeError(f"Token identity check failed for patcher reconstruction: {stage1_mismatch}/{total_checked} mismatched")
+        if patcher2_enabled and stage2_mismatch != 0:
+            raise RuntimeError(f"Token identity check failed for patcher2 reconstruction: {stage2_mismatch}/{total_checked} mismatched")
 
     summary = {
         "source_dir": str(source_dir),
@@ -169,6 +232,12 @@ def main():
         "val_stage2_hidden": "val_stage2_hidden.npy",
         "model_seq_len_large_patches": int(cfg["model"]["seq_len"]),
         "effective_token_seq_len": seq_len,
+        "patcher2_enabled": patcher2_enabled,
+        "token_identity_check": {
+            "enabled": bool(args.verify_token_identity),
+            "train": train_verify,
+            "val": val_verify,
+        },
     }
 
     with open(out_dir / "stage_info.json", "w", encoding="utf-8") as f:
