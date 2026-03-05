@@ -1,0 +1,181 @@
+#!/usr/bin/env python
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import argparse
+
+import torch
+
+from blt_lite.model import PatcherAutoencoder
+from blt_lite.tokenizer import FixedPatchTokenizer
+from blt_lite.train import build_dataloaders
+from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
+from torch.optim import AdamW
+
+
+def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
+    model_cfg = cfg["model"]
+    patcher_cfg = cfg["patcher"]
+    seq_len = _token_seq_len_from_cfg(cfg)
+    patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
+    d_model = int(model_cfg["d_model"])
+
+    emb = torch.nn.Embedding(tokenizer.vocab_len, d_model).to(device)
+    patcher = PatcherAutoencoder(
+        in_dim=d_model,
+        latent_dim=int(patcher_cfg.get("latent_dim", d_model)),
+        out_dim=d_model,
+        patch_size=patch_size,
+        seq_len=seq_len,
+        encoder_layers=int(patcher_cfg.get("encoder_layers", 2)),
+        decoder_layers=int(patcher_cfg.get("decoder_layers", 2)),
+        n_heads=int(patcher_cfg.get("n_heads", model_cfg["n_heads"])),
+        dropout=float(patcher_cfg.get("dropout", model_cfg["dropout"])),
+        pos_encoding=str(patcher_cfg.get("pos_encoding", "learned")),
+        grad_checkpointing=bool(patcher_cfg.get("grad_checkpointing", False)),
+        flash_attention=bool(patcher_cfg.get("flash_attention", True)),
+        block_attention=bool(patcher_cfg.get("block_attention", False)),
+        block_size=int(patcher_cfg.get("block_size", 8)),
+    ).to(device)
+    return emb, patcher
+
+
+def maybe_reduce_lr_by_thresholds(optimizer, val_loss: float, patcher_train: dict, reduction_state: dict) -> dict:
+    thresholds = [
+        ("lr_reduce_threshold", "lr_reduce_factor"),
+        ("lr_reduce_threshold_2", "lr_reduce_factor_2"),
+    ]
+    lr_min = float(patcher_train.get("lr_min", 1e-6))
+    for idx, (thr_key, fac_key) in enumerate(thresholds):
+        if reduction_state.get(idx, False):
+            continue
+        threshold = patcher_train.get(thr_key)
+        if threshold is None or val_loss > float(threshold):
+            continue
+
+        factor = float(patcher_train.get(fac_key, patcher_train.get("lr_reduce_factor", 0.5)))
+        for group in optimizer.param_groups:
+            old_lr = float(group["lr"])
+            group["lr"] = max(lr_min, old_lr * factor)
+            print(f"Reduced patcher LR via {thr_key}: {old_lr:.8f} -> {group['lr']:.8f}")
+        reduction_state[idx] = True
+    return reduction_state
+
+
+def _token_seq_len_from_cfg(cfg: dict) -> int:
+    model_cfg = cfg["model"]
+    p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
+    default_seq_len = int(model_cfg["seq_len"]) * p1
+    return int(cfg.get("patcher_train", {}).get("seq_len_tokens", default_seq_len))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    set_seed(int(cfg["train"].get("seed", 42)))
+
+    device = get_device()
+    processed_dir = Path(cfg["data"]["processed_dir_patcher"])
+    tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
+
+    patcher_train = cfg.get("patcher_train", {})
+    train_loader, val_loader = build_dataloaders(
+        processed_dir / "train_tokens.npy",
+        processed_dir / "val_tokens.npy",
+        seq_len=_token_seq_len_from_cfg(cfg),
+        batch_size=int(patcher_train.get("batch_size", cfg["train"]["batch_size"])),
+    )
+
+    token_emb, patcher = build_patcher_and_embed(cfg, tokenizer, device)
+    params = list(token_emb.parameters()) + list(patcher.parameters())
+    optimizer = AdamW(
+        params,
+        lr=float(patcher_train.get("lr", 3e-4)),
+        weight_decay=float(patcher_train.get("weight_decay", 0.01)),
+    )
+    patcher_amp_enabled = bool(patcher_train.get("amp_enabled", cfg.get("train", {}).get("amp_enabled", True)))
+    patcher_amp_dtype = torch.float16 if str(patcher_train.get("amp_dtype", cfg.get("train", {}).get("amp_dtype", "float16"))) == "float16" else torch.bfloat16
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and patcher_amp_enabled))
+
+    out_dir = ensure_dir(patcher_train.get("out_dir", "outputs/patcher"))
+    max_steps = int(patcher_train.get("max_steps", 3000))
+    eval_every = int(patcher_train.get("eval_every", 100))
+    save_every = int(patcher_train.get("save_every", 200))
+
+    def batch_loss(x: torch.Tensor) -> torch.Tensor:
+        token_hidden = token_emb(x)
+        recon_hidden, _ = patcher(token_hidden)
+        return torch.nn.functional.mse_loss(recon_hidden, token_hidden)
+
+    best_val = float("inf")
+    step = 0
+    lr_reduction_state: dict[int, bool] = {}
+    patcher.train()
+    token_emb.train()
+    while step < max_steps:
+        for x, _ in train_loader:
+            x = x.to(device)
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and patcher_amp_enabled), dtype=patcher_amp_dtype):
+                loss = batch_loss(x)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(params, float(patcher_train.get("grad_clip", 1.0)))
+            scaler.step(optimizer)
+            scaler.update()
+
+            if step % 20 == 0:
+                print(f"patcher_step={step} recon_loss={loss.item():.6f}")
+
+            if step % eval_every == 0 and step > 0:
+                patcher.eval(); token_emb.eval()
+                losses = []
+                with torch.no_grad():
+                    for vx, _ in val_loader:
+                        vx = vx.to(device)
+                        with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and patcher_amp_enabled), dtype=patcher_amp_dtype):
+                            losses.append(batch_loss(vx).item())
+                        if len(losses) >= int(patcher_train.get("eval_batches", 50)):
+                            break
+                val_loss = float(sum(losses) / max(1, len(losses)))
+                print(f"patcher_step={step} val_recon_loss={val_loss:.6f}")
+                if val_loss < best_val:
+                    best_val = val_loss
+                    torch.save(
+                        {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
+                        out_dir / "best.pt",
+                    )
+                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, val_loss, patcher_train, lr_reduction_state)
+                patcher.train(); token_emb.train()
+
+            if step % save_every == 0 and step > 0:
+                torch.save(
+                    {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
+                    out_dir / f"step_{step}.pt",
+                )
+
+            step += 1
+            if step >= max_steps:
+                break
+
+    torch.save(
+        {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
+        out_dir / "last.pt",
+    )
+    print(f"Patcher pretraining complete. Outputs in {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
