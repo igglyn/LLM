@@ -69,6 +69,31 @@ def parse_step_from_checkpoint_name(path: Path) -> int:
     raise ValueError(f"Checkpoint filename must match step_<N>.pt, best.pt, or last.pt; got: {path.name}")
 
 
+
+
+def _has_required_token_artifacts(processed_dir: Path) -> bool:
+    return (processed_dir / "train_tokens.npy").exists() and (processed_dir / "val_tokens.npy").exists() and (processed_dir / "tokenizer.json").exists()
+
+
+def _resolve_processed_dir(cfg: dict) -> Path:
+    data_cfg = cfg["data"]
+    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
+    tiny_dir = Path(data_cfg["processed_dir_tiny"])
+    if patcher2_enabled:
+        return tiny_dir
+
+    if _has_required_token_artifacts(tiny_dir):
+        return tiny_dir
+
+    patcher_dir = Path(data_cfg["processed_dir_patcher"])
+    if _has_required_token_artifacts(patcher_dir):
+        return patcher_dir
+
+    raise FileNotFoundError(
+        "No valid token dataset for tiny training with patcher2 disabled. "
+        f"Checked: {tiny_dir} and {patcher_dir}."
+    )
+
 def _resolve_checkpoint_path(raw_path: str, out_dir: Path) -> Path:
     ckpt_path = Path(raw_path)
     if not ckpt_path.is_absolute() and not ckpt_path.exists():
@@ -207,8 +232,6 @@ def main():
 
     device = get_device()
     out_dir = ensure_dir(tcfg.get("out_dir", "outputs"))
-    processed_dir = Path(cfg["data"]["processed_dir_tiny"])
-    tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     resume_ckpt = None
     step = 0
@@ -219,6 +242,11 @@ def main():
             cfg = resume_ckpt["config"]
             tcfg = cfg["train"]
         step = parse_step_from_checkpoint_name(ckpt_path)
+
+    processed_dir = _resolve_processed_dir(cfg)
+    if not bool(cfg.get("patcher2", {}).get("enabled", True)):
+        print(f"patcher2 disabled; using token dataset from {processed_dir}")
+    tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     seq_len = _token_seq_len_from_cfg(cfg)
     cached_train = processed_dir / "train_stage2_hidden.npy"
