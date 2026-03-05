@@ -45,6 +45,7 @@ def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.dev
     model_cfg = cfg["model"]
     patcher_cfg = cfg["patcher"]
     p2cfg = cfg["patcher2"]
+    patcher2_enabled = bool(p2cfg.get("enabled", True))
     d_model = int(model_cfg["d_model"])
     seq_len = _token_seq_len_from_cfg(cfg)
 
@@ -65,22 +66,24 @@ def _build_patchers(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.dev
         block_attention=bool(patcher_cfg.get("block_attention", False)),
         block_size=int(patcher_cfg.get("block_size", 8)),
     ).to(device)
-    p2 = PatcherAutoencoder(
-        in_dim=d_model,
-        latent_dim=int(p2cfg.get("latent_dim", d_model)),
-        out_dim=d_model,
-        patch_size=int(p2cfg.get("patch_size", 2)),
-        seq_len=seq_len,
-        encoder_layers=int(p2cfg.get("encoder_layers", 2)),
-        decoder_layers=int(p2cfg.get("decoder_layers", 2)),
-        n_heads=int(p2cfg.get("n_heads", model_cfg["n_heads"])),
-        dropout=float(p2cfg.get("dropout", model_cfg["dropout"])),
-        pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
-        grad_checkpointing=bool(p2cfg.get("grad_checkpointing", False)),
-        flash_attention=bool(p2cfg.get("flash_attention", True)),
-        block_attention=bool(p2cfg.get("block_attention", False)),
-        block_size=int(p2cfg.get("block_size", 8)),
-    ).to(device)
+    p2 = None
+    if patcher2_enabled:
+        p2 = PatcherAutoencoder(
+            in_dim=d_model,
+            latent_dim=int(p2cfg.get("latent_dim", d_model)),
+            out_dim=d_model,
+            patch_size=int(p2cfg.get("patch_size", 2)),
+            seq_len=seq_len,
+            encoder_layers=int(p2cfg.get("encoder_layers", 2)),
+            decoder_layers=int(p2cfg.get("decoder_layers", 2)),
+            n_heads=int(p2cfg.get("n_heads", model_cfg["n_heads"])),
+            dropout=float(p2cfg.get("dropout", model_cfg["dropout"])),
+            pos_encoding=str(p2cfg.get("pos_encoding", "learned")),
+            grad_checkpointing=bool(p2cfg.get("grad_checkpointing", False)),
+            flash_attention=bool(p2cfg.get("flash_attention", True)),
+            block_attention=bool(p2cfg.get("block_attention", False)),
+            block_size=int(p2cfg.get("block_size", 8)),
+        ).to(device)
     return emb, p1, p2, d_model, seq_len
 
 
@@ -113,8 +116,12 @@ def main():
 
     cfg = load_config(args.config)
     data_cfg = cfg["data"]
-    source_dir = Path(data_cfg["processed_dir_patcher2"])
+    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
+    source_dir = Path(data_cfg["processed_dir_patcher2"] if patcher2_enabled else data_cfg["processed_dir_patcher"])
     out_dir = ensure_dir(data_cfg["processed_dir_tiny"])
+
+    if not patcher2_enabled:
+        print(f"patcher2 disabled; building tiny-stage caches from {source_dir}")
 
     for fname in ("train_tokens.npy", "val_tokens.npy", "tokenizer.json"):
         src = source_dir / fname
@@ -127,7 +134,6 @@ def main():
     emb, p1, p2, d_model, seq_len = _build_patchers(cfg, tokenizer, device)
 
     p1_path = cfg.get("patcher", {}).get("pretrained_path", "")
-    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
     p2_path = cfg.get("patcher2", {}).get("pretrained_path", "")
     if not p1_path:
         raise ValueError("patcher.pretrained_path must be set before preparing tiny hidden states")
@@ -142,15 +148,17 @@ def main():
 
     if patcher2_enabled:
         ckpt2 = torch.load(p2_path, map_location=device)
+        if p2 is None:
+            raise ValueError("patcher2 enabled but patcher2 model was not constructed")
         p2.load_state_dict(ckpt2["patcher2"] if isinstance(ckpt2, dict) and "patcher2" in ckpt2 else ckpt2)
     emb.eval(); p1.eval();
-    if patcher2_enabled:
+    if p2 is not None:
         p2.eval()
 
     train_tokens = np.load(out_dir / "train_tokens.npy")
     val_tokens = np.load(out_dir / "val_tokens.npy")
-    _encode_stream(train_tokens, emb, p1, p2 if patcher2_enabled else None, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
-    _encode_stream(val_tokens, emb, p1, p2 if patcher2_enabled else None, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
+    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
+    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
 
     summary = {
         "source_dir": str(source_dir),
