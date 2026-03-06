@@ -1,5 +1,8 @@
 # Tiny dynamic BLT patching example.
 # Uses heuristic variable-length boundaries for patcher1.
+# NOTE: Dynamic patching emits variable-length compressed patch-space logits;
+# treat this as compressed/forward-only (or alternate-objective) rather than
+# byte-aligned next-token CE training.
 
 [data]
 dataset = "byte_dataset"

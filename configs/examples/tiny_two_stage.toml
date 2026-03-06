@@ -1,3 +1,6 @@
+# NOTE: Two-stage patching further compresses sequence length. This config is
+# compressed/forward-only by default and is not byte-aligned CE-valid for the
+# main next-byte loss unless an explicit byte-target mapping objective is used.
 [data]
 dataset = "byte_dataset"
 batch_size = 8
