@@ -136,6 +136,8 @@ def train_loop(
             raise ValueError("patcher_only mode requires model.component_param_groups().")
         groups = model.component_param_groups()
         patcher_param_ids = {id(p) for p in groups.get("patcher1", []) + groups.get("patcher2", [])}
+        if not patcher_param_ids:
+            raise ValueError("patcher_only mode requires at least one patcher parameter.")
         opt_param_ids = {
             id(p)
             for group in optimizer.param_groups

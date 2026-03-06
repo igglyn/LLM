@@ -81,8 +81,14 @@ def main() -> None:
 
     use_precomputed = bool(getattr(cfg.data, "use_precomputed_patches", False))
     precomputed_path = str(getattr(cfg.data, "precomputed_patches_path", "") or "")
+    train_mode = str(getattr(cfg.train, "mode", "full"))
 
     if use_precomputed:
+        if train_mode == "patcher_only":
+            raise ValueError(
+                "train.mode='patcher_only' is not supported with precomputed patches: "
+                "patcher1 is not part of this training path."
+            )
         if not precomputed_path:
             print("precomputed path is enabled but data.precomputed_patches_path is empty")
             return
@@ -105,17 +111,32 @@ def main() -> None:
                 self.patcher2 = assembled.patcher2
                 self.mixers = assembled.mixers
                 self.head = assembled.head
+                self.memory = assembled.memory
+                self.patcher2_stop_gradient = bool(getattr(assembled, "patcher2_stop_gradient", False))
 
             def forward(self, h):
                 x = h
+                h2 = None
                 if self.patcher2 is not None:
-                    x = self.patcher2(x)
+                    h2 = self.patcher2(x)
+                    if self.patcher2_stop_gradient:
+                        h2 = h2.detach()
+
+                uses_context_pyramid = self.memory is not None and hasattr(self.memory, "combine")
+                if uses_context_pyramid:
+                    x, recent_len = self.memory.combine(x, h2)
+                else:
+                    x = h2 if h2 is not None else x
+                    recent_len = x.shape[1]
+
                 for mixer in self.mixers:
                     x = mixer(x)
-                return self.head(x)
+
+                x_head = x[:, -recent_len:, :] if uses_context_pyramid else x
+                return self.head(x_head)
 
         pre_model = _PrecomputedPathModel(model)
-        optimizer = build_optimizer(pre_model, lr=cfg.train.lr)
+        optimizer = build_optimizer(pre_model, lr=cfg.train.lr, mode=train_mode)
         metrics = _train_loop_precomputed(
             model=pre_model,
             dataloader=dataloader,
@@ -141,7 +162,7 @@ def main() -> None:
             drop_last=True,
         )
 
-        optimizer = build_optimizer(model, lr=cfg.train.lr)
+        optimizer = build_optimizer(model, lr=cfg.train.lr, mode=train_mode)
 
         metrics = train_loop(
             model=model,
@@ -160,6 +181,7 @@ def main() -> None:
             preserve_memory_across_batches=cfg.train.preserve_memory_across_batches,
             reset_memory_on_document_boundary=cfg.train.reset_memory_on_document_boundary,
             truncate_bptt_segments=cfg.train.truncate_bptt_segments,
+            mode=train_mode,
         )
 
     print(f"completed step={metrics['step']} loss={metrics['loss']:.6f}")

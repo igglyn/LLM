@@ -52,12 +52,15 @@ def _component_from_dict(value: Any, *, required: bool) -> ComponentCfg | None:
         raise ValueError("Component 'kwargs' must be a table/dict when provided.")
 
     inline_kwargs = {
-        k: v for k, v in value.items() if k not in {"name", "kwargs", "freeze"}
+        k: v
+        for k, v in value.items()
+        if k not in {"name", "kwargs", "freeze", "stop_gradient"}
     }
     kwargs = {**kwargs, **inline_kwargs}
 
     freeze = bool(value.get("freeze", False))
-    return ComponentCfg(name=name, kwargs=kwargs, freeze=freeze)
+    stop_gradient = bool(value.get("stop_gradient", False))
+    return ComponentCfg(name=name, kwargs=kwargs, freeze=freeze, stop_gradient=stop_gradient)
 
 
 def _mixers_from_model_dict(raw_model: dict[str, Any], merged_model: dict[str, Any]) -> list[ComponentCfg]:

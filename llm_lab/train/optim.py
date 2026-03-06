@@ -21,6 +21,10 @@ def _apply_train_mode(model: nn.Module, mode: str) -> None:
         raise ValueError("patcher_only mode requires model.component_param_groups().")
 
     groups = model.component_param_groups()
+    patcher_params = groups.get("patcher1", []) + groups.get("patcher2", [])
+    if len(patcher_params) == 0:
+        raise ValueError("patcher_only mode requires at least one patcher parameter.")
+
     # Keep patchers trainable; freeze everything else for dedicated pretraining.
     _set_requires_grad(groups.get("patcher1", []), True)
     _set_requires_grad(groups.get("patcher2", []), True)
