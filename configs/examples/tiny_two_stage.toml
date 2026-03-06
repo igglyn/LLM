@@ -1,0 +1,33 @@
+[data]
+dataset = "byte_dataset"
+batch_size = 8
+seq_len = 128
+
+[model.codec]
+name = "identity"
+
+[model.patcher1]
+name = "chunk"
+patch_size = 8
+d_model = 16
+
+[model.patcher2]
+name = "hidden_chunk"
+patch_size = 2
+d_model = 16
+use_mlp = false
+
+[[model.mixers]]
+name = "transformer"
+d_model = 16
+n_heads = 4
+n_layers = 1
+
+[model.head]
+name = "byte"
+d_model = 16
+
+[train]
+steps = 50
+lr = 0.001
+seed = 42

@@ -1,0 +1,34 @@
+# Tiny dynamic BLT patching example.
+# Uses heuristic variable-length boundaries for patcher1.
+
+[data]
+dataset = "byte_dataset"
+batch_size = 4
+seq_len = 64
+
+[model.codec]
+name = "identity"
+
+[model.patcher1]
+name = "dynamic_blt"
+max_patch_size = 8
+min_patch_size = 2
+d_model = 16
+heuristic = "whitespace"
+
+[[model.mixers]]
+name = "transformer"
+d_model = 16
+n_heads = 4
+n_layers = 1
+
+[model.head]
+name = "byte"
+d_model = 16
+
+[train]
+steps = 10
+lr = 0.001
+seed = 42
+preserve_memory_across_batches = false
+reset_memory_on_document_boundary = false

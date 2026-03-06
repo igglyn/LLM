@@ -1,0 +1,26 @@
+[data]
+dataset = "byte_dataset"
+batch_size = 8
+seq_len = 128
+
+[model.codec]
+name = "identity"
+
+[model.patcher1]
+name = "chunk"
+
+[[model.mixers]]
+name = "perceiver_io"
+d_model = 16
+num_latents = 8
+n_layers = 2
+n_heads = 4
+
+[model.head]
+name = "byte"
+d_model = 16
+
+[train]
+steps = 50
+lr = 0.001
+seed = 42
