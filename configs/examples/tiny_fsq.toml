@@ -1,0 +1,32 @@
+# Tiny FSQ codec example.
+# Enables deterministic finite scalar quantization on patcher hidden states.
+
+[data]
+dataset = "byte_dataset"
+batch_size = 4
+seq_len = 64
+
+[model.codec]
+name = "fsq"
+levels_per_dim = 8
+d_model = 16
+
+[model.patcher1]
+name = "chunk"
+patch_size = 8
+d_model = 16
+
+[[model.mixers]]
+name = "transformer"
+d_model = 16
+n_heads = 4
+n_layers = 1
+
+[model.head]
+name = "byte"
+d_model = 16
+
+[train]
+steps = 10
+lr = 0.001
+seed = 42

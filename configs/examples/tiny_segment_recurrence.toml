@@ -1,0 +1,39 @@
+# Tiny segment recurrence example.
+# Enables memory-preserving training across truncated BPTT segments.
+
+[data]
+dataset = "byte_dataset"
+batch_size = 4
+seq_len = 64
+
+[model.codec]
+name = "identity"
+
+[model.patcher1]
+name = "chunk"
+patch_size = 8
+d_model = 16
+
+[[model.mixers]]
+name = "transformer"
+d_model = 16
+n_heads = 4
+n_layers = 1
+
+[model.memory]
+name = "knn_fifo"
+d_model = 16
+max_tokens = 64
+k = 4
+
+[model.head]
+name = "byte"
+d_model = 16
+
+[train]
+steps = 10
+lr = 0.001
+seed = 42
+preserve_memory_across_batches = true
+reset_memory_on_document_boundary = false
+truncate_bptt_segments = 16

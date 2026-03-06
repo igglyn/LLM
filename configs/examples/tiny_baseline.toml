@@ -1,0 +1,21 @@
+[data]
+dataset = "byte_dataset"
+batch_size = 8
+seq_len = 128
+
+[model.codec]
+name = "identity"
+
+[model.patcher1]
+name = "chunk"
+
+[model.mixer]
+name = "transformer"
+
+[model.head]
+name = "byte"
+
+[train]
+steps = 50
+lr = 0.001
+seed = 42

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm_lab"
+version = "0.1.0"
+description = "Modular sequence modeling experimentation framework"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "numpy",
+]
+
+[tool.setuptools.packages.find]
+include = ["llm_lab*"]
