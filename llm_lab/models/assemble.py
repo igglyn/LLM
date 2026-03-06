@@ -118,7 +118,15 @@ class AssembledModel(nn.Module):
 
 
     def forward_with_aux(self, x_u8: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward pass returning main logits and optional reconstruction logits."""
+        """Forward pass returning main logits and optional reconstruction logits.
+
+        Note on output semantics:
+        - ``logits[:, t, :]`` predicts bytes for the t-th position in the model's
+          *current hidden sequence* after patching/memory/mixing.
+        - This sequence may be compressed relative to raw-byte length (e.g., chunked
+          patchers), so output time positions are generally patch-space positions,
+          not guaranteed one-per-input-byte positions.
+        """
         h1, h1_downstream = self.downstream_hidden_from_bytes(x_u8, apply_stop_gradient=True)
 
         h2 = None
