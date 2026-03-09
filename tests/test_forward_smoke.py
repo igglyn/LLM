@@ -205,7 +205,7 @@ def test_forward_smoke_with_aux_reconstruction_logits() -> None:
     assert recon_logits.shape == (2, 3, 8, 256)
 
 
-def test_train_loop_aux_reconstruction_loss_finite() -> None:
+def test_train_loop_aux_reconstruction_raises_on_compressed_logits_alignment() -> None:
     torch = pytest.importorskip("torch")
     from torch.utils.data import DataLoader
 
@@ -223,17 +223,15 @@ def test_train_loop_aux_reconstruction_loss_finite() -> None:
     samples = [torch.randint(0, 256, (17,), dtype=torch.uint8) for _ in range(4)]
     dataloader = DataLoader(samples, batch_size=2, shuffle=False)
 
-    metrics = train_loop(
-        model=model,
-        dataloader=dataloader,
-        optimizer=optimizer,
-        steps=1,
-        enable_aux_reconstruction=True,
-        aux_reconstruction_weight=cfg.train.aux_reconstruction_weight,
-    )
-
-    assert metrics["step"] == 1
-    assert float(metrics["loss"]) == pytest.approx(float(metrics["loss"]))
+    with pytest.raises(ValueError, match="byte-aligned logits"):
+        train_loop(
+            model=model,
+            dataloader=dataloader,
+            optimizer=optimizer,
+            steps=1,
+            enable_aux_reconstruction=True,
+            aux_reconstruction_weight=cfg.train.aux_reconstruction_weight,
+        )
 
 
 

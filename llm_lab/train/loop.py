@@ -66,6 +66,28 @@ def _split_bptt_segments(batch_u8: torch.Tensor, segment_len: int | None) -> lis
     return segments
 
 
+def _validate_byte_loss_alignment(*, segment_u8: torch.Tensor, logits: torch.Tensor) -> None:
+    """Validate that logits can be aligned to next-byte targets.
+
+    Main loss in this loop is byte-level next-token cross entropy:
+    - target bytes are ``segment_u8[:, 1:]`` (predict next byte at each position)
+    - therefore logits must provide one position per input byte, i.e. ``T_logits == T_in``
+
+    If a model emits compressed patch-space logits (``T_logits < T_in``), there is no
+    explicit mapping to byte-level targets in this objective and training would be
+    semantically ambiguous.
+    """
+    t_in = int(segment_u8.shape[1])
+    t_out = int(logits.shape[1])
+    if t_out != t_in:
+        raise ValueError(
+            "Main loss expects byte-aligned logits with one output position per input byte "
+            f"(got logits_len={t_out}, input_len={t_in}). "
+            "Current objective uses next-byte targets segment_u8[:, 1:], so compressed "
+            "patch-space outputs require an explicit mapping rule that is not implemented."
+        )
+
+
 def save_checkpoint(
     path: str,
     *,
@@ -136,6 +158,8 @@ def train_loop(
             raise ValueError("patcher_only mode requires model.component_param_groups().")
         groups = model.component_param_groups()
         patcher_param_ids = {id(p) for p in groups.get("patcher1", []) + groups.get("patcher2", [])}
+        if not patcher_param_ids:
+            raise ValueError("patcher_only mode requires at least one patcher parameter.")
         opt_param_ids = {
             id(p)
             for group in optimizer.param_groups
@@ -191,10 +215,12 @@ def train_loop(
                         logits = model(segment_u8)
                         recon_logits = None
 
-                    # Align targets to logits time dimension.
-                    t_out = logits.size(1)
-                    target = segment_u8[:, 1 : 1 + t_out].to(torch.long)
-                    logits_bt = logits[:, : target.size(1), :]
+                    _validate_byte_loss_alignment(segment_u8=segment_u8, logits=logits)
+
+                    # Byte-level next-token objective:
+                    # logit at position t predicts byte at t+1.
+                    target = segment_u8[:, 1:].to(torch.long)
+                    logits_bt = logits[:, :-1, :]
                     main_loss = F.cross_entropy(
                         logits_bt.reshape(-1, logits_bt.size(-1)),
                         target.reshape(-1),

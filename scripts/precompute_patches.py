@@ -37,9 +37,8 @@ def main() -> None:
         state = ckpt.get("model", ckpt)
         model.load_state_dict(state, strict=False)
 
-    patcher1 = model.patcher1
-    patcher1.eval()
-    for p in patcher1.parameters():
+    model.eval()
+    for p in model.parameters():
         p.requires_grad = False
 
     dataset = ByteDataset(
@@ -62,7 +61,7 @@ def main() -> None:
     hidden_batches: list[torch.Tensor] = []
     with torch.no_grad():
         for x_u8 in loader:
-            h = patcher1(x_u8)
+            _, h = model.downstream_hidden_from_bytes(x_u8, apply_stop_gradient=False)
             hidden_batches.append(h.cpu())
 
     hidden = torch.cat(hidden_batches, dim=0)
