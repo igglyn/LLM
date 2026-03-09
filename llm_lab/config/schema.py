@@ -1,7 +1,7 @@
 """Structured configuration dataclasses for llm_lab."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -27,7 +27,12 @@ class DataCfg:
     """Data pipeline configuration."""
 
     dataset: str = "byte_dataset"
+    dataset_type: Literal["bytes_txt", "jsonl_text"] = "bytes_txt"
     path: str = ""
+    jsonl_path: str = ""
+    jsonl_text_field: str | None = None
+    jsonl_group_size: int = 1
+    jsonl_shuffle_buffer: int = 0
     batch_size: int = 4
     seq_len: int = 128
     use_precomputed_patches: bool = False
