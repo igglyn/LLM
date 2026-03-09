@@ -63,6 +63,7 @@ def main() -> None:
         return
 
     from llm_lab.data.byte_dataset import ByteDataset
+    from llm_lab.data.jsonl_text_dataset import JsonlTextDataset
     from llm_lab.data.collate import collate_batch
     from llm_lab.data.precomputed_patch_dataset import PrecomputedPatchDataset
     from llm_lab.models.assemble import assemble_model
@@ -145,13 +146,33 @@ def main() -> None:
             device=device,
         )
     else:
-        dataset = ByteDataset(
-            data_dir=cfg.data.path,
-            seq_len=cfg.data.seq_len,
-            seed=cfg.train.seed,
-        )
+        dataset_type = str(getattr(cfg.data, "dataset_type", "bytes_txt") or "bytes_txt")
+
+        if dataset_type == "jsonl_text":
+            jsonl_path = str(getattr(cfg.data, "jsonl_path", "") or "")
+            if not jsonl_path:
+                print("data.dataset_type='jsonl_text' requires data.jsonl_path")
+                return
+            dataset = JsonlTextDataset(
+                jsonl_path=jsonl_path,
+                seq_len=cfg.data.seq_len,
+                seed=cfg.train.seed,
+                jsonl_text_field=getattr(cfg.data, "jsonl_text_field", None),
+                include_prompt=bool(getattr(cfg.data, "include_prompt", False)),
+                jsonl_group_size=int(getattr(cfg.data, "jsonl_group_size", 1)),
+                jsonl_shuffle_buffer=int(getattr(cfg.data, "jsonl_shuffle_buffer", 0)),
+            )
+            empty_msg = "dataset is empty; provide JSONL records at data.jsonl_path"
+        else:
+            dataset = ByteDataset(
+                data_dir=cfg.data.path,
+                seq_len=cfg.data.seq_len,
+                seed=cfg.train.seed,
+            )
+            empty_msg = "dataset is empty; provide .txt files in data.path"
+
         if len(dataset) == 0:
-            print("dataset is empty; provide .txt files in data.path")
+            print(empty_msg)
             return
 
         dataloader = DataLoader(
