@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="wiki_en">
+        <Source name="wiki-source" format="jsonl" uri="s3://datasets/wiki?lang=en&amp;slice=train" />
+        <SplitMapping>
+          <Map from="train" to="train" />
+          <Map from="validation" to="val" />
+        </SplitMapping>
+        <Filter type="min_tokens" value="128" />
+      </DatasetEntry>
+
+      <DatasetEntry name="code_py">
+        <Source name="code-source" format="parquet" uri="s3://datasets/code/python" />
+        <Filter type="language" value="python" />
+      </DatasetEntry>
+
+      <DatasetEntry name="math_qa">
+        <Source name="math-source" format="jsonl" uri="s3://datasets/math_qa" />
+        <SplitMapping>
+          <Map from="train" to="train" />
+        </SplitMapping>
+        <Filter type="dedupe" value="exact" />
+      </DatasetEntry>
+    </SourceExtraction>
+
+    <MixtureBuild strategy="weighted">
+      <Group name="general" percentage="50">
+        <DatasetRef name="wiki_en" />
+      </Group>
+      <Group name="code" percentage="30">
+        <DatasetRef name="code_py" />
+      </Group>
+      <Group name="reasoning" percentage="20">
+        <DatasetRef name="math_qa" />
+      </Group>
+    </MixtureBuild>
+
+    <Distillation objective="logits+structure">
+      <Teachers>
+        <Teacher name="teacher_main">
+          <Backend type="vllm">
+            <ModelRef name_or_path="org/teacher-70b" />
+            <Execution device="cuda" precision="bf16" tensor_parallel="8" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+
+      <StageA enabled="true" teacher_ref="teacher_main">
+        <TopKLogits k="64" temperature="1.0" />
+      </StageA>
+      <StageB enabled="true" teacher_ref="teacher_main">
+        <LongContext max_tokens="16384" packing="true" />
+      </StageB>
+      <StageC enabled="true" teacher_ref="teacher_main">
+        <StructuredOutputs schema="json" strict="true" />
+      </StageC>
+    </Distillation>
+  </Dataset>
+
+  <Model>
+    <Defaults d_model="4096" n_heads="32" />
+
+    <Patcher name="patcher_text" patch_size="256">
+      <Train mode="finetune">
+        <Optimizer type="adamw" lr="0.0003" weight_decay="0.1">
+          <Scheduler type="cosine" t_max="20000" min_lr="0.00001" />
+          <Scheduler type="loss_threshold" monitor="val_loss" threshold="1.8" decay_factor="0.5" />
+        </Optimizer>
+      </Train>
+      <RoPE base="10000" />
+      <Transformer layers="2" hidden_size="1024" />
+      <PosEmbedding type="learned" />
+    </Patcher>
+
+    <Patcher name="patcher_code" patch_size="512">
+      <Train mode="finetune">
+        <Optimizer type="adamw" lr="0.0002" weight_decay="0.05">
+          <Scheduler type="cosine" t_max="15000" min_lr="0.00001" />
+          <Scheduler type="loss_threshold" monitor="train_loss" threshold="1.2" decay_factor="0.7" />
+        </Optimizer>
+      </Train>
+      <PosEmbedding type="learned" />
+      <RoPE base="500000" />
+      <Transformer layers="3" hidden_size="1536" />
+    </Patcher>
+
+    <Trunk name="main_trunk" context="32768">
+      <Train mode="full">
+        <Optimizer type="adamw" lr="0.0001" weight_decay="0.1">
+          <Scheduler type="cosine" t_max="50000" min_lr="0.000005" />
+        </Optimizer>
+      </Train>
+      <DRope scale="2.0" />
+      <MixOfExperts name="moe_main">
+        <Expert name="expert_1">
+          <Transformer layers="8" hidden_size="4096" />
+        </Expert>
+      </MixOfExperts>
+      <Transformer layers="24" hidden_size="4096" />
+    </Trunk>
+  </Model>
+</Config>
