@@ -36,6 +36,10 @@ def run_mixture_build(config: ConfigSpec, extracted_docs: list[ExtractedDocument
     group_targets: dict[str, int] = {}
     for group in mixture_spec.groups:
         pool: list[ExtractedDocument] = []
+
+        for dataset_ref in group.dataset_refs:
+            if dataset_ref.name not in grouped_by_dataset:
+                raise MixtureBuildError(f"DatasetRef '{dataset_ref.name}' in group '{group.name}' has no extracted documents.")
         for dataset_ref in group.dataset_refs:
             pool.extend(filtered_docs.get(dataset_ref.name, []))
         group_pools[group.name] = pool
@@ -53,6 +57,7 @@ def run_mixture_build(config: ConfigSpec, extracted_docs: list[ExtractedDocument
                 split=doc.split,
                 text=doc.text,
                 byte_length=doc.byte_length,
+                metadata=doc.metadata,
             )
         )
     return output
