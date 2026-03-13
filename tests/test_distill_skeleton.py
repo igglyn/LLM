@@ -3,10 +3,12 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 from distill.io_jsonl import read_jsonl, write_jsonl
+from distill.extraction import run_extraction
 from distill.schemas import MixtureEntry, NormalizedDocument
 from distill.stages.stage_a import StageAError, run_stage_a
 from distill.teachers import teacher_by_ref
@@ -71,6 +73,28 @@ def test_jsonl_writer_schema_shape(tmp_path: Path) -> None:
     assert set(parsed[0].keys()) == {"document_id", "dataset_entry", "split", "text", "byte_length", "metadata"}
 
 
+def test_huggingface_source_type_is_available(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_datasets = ModuleType("datasets")
+
+    def fake_load_dataset(name: str, *, split: str):
+        assert name == "my-dataset"
+        assert split == "train"
+        return [{"body": "hello hf"}, {"body": "world hf"}]
+
+    fake_datasets.load_dataset = fake_load_dataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    config = tmp_path / "hf_config.xml"
+    config.write_text(_hf_config_xml(), encoding="utf-8")
+    resolved = resolve_config(parse_config(config))
+
+    rows = run_extraction(resolved)
+    assert len(rows) == 2
+    assert rows[0].split == "train"
+    assert rows[0].metadata["hf_split"] == "train"
+    assert rows[0].text == "hello hf"
+
+
 def _config_xml(glob_path: str, *, topk_k: str = "3") -> str:
     return f"""
 <Config>
@@ -102,6 +126,41 @@ def _config_xml(glob_path: str, *, topk_k: str = "3") -> str:
     <Defaults d_model=\"1024\" n_heads=\"8\" />
     <Patcher name=\"p1\" patch_size=\"128\"><Train mode=\"x\"><Optimizer type=\"adamw\" lr=\"0.001\" weight_decay=\"0.0\" /></Train><Transformer /></Patcher>
     <Trunk name=\"t1\" context=\"1024\"><Train mode=\"x\"><Optimizer type=\"adamw\" lr=\"0.001\" weight_decay=\"0.0\" /></Train><Transformer /></Trunk>
+  </Model>
+</Config>
+"""
+
+
+def _hf_config_xml() -> str:
+    return """
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_hf">
+        <Source name="hf" type="huggingface" uri="my-dataset" split="train" text_column="body" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild target_documents="1" random_seed="7">
+      <Group name="g1" percentage="100"><DatasetRef name="set_hf" /></Group>
+    </MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="teacher_local">
+          <Backend type="dummy_local">
+            <ModelRef name_or_path="dummy" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+      <StageA enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></StageA>
+      <StageB enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></StageB>
+      <StageC enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></StageC>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="1024" n_heads="8" />
+    <Patcher name="p1" patch_size="128"><Train mode="x"><Optimizer type="adamw" lr="0.001" weight_decay="0.0" /></Train><Transformer /></Patcher>
+    <Trunk name="t1" context="1024"><Train mode="x"><Optimizer type="adamw" lr="0.001" weight_decay="0.0" /></Train><Transformer /></Trunk>
   </Model>
 </Config>
 """
