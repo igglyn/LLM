@@ -19,4 +19,5 @@ class TransformerBlock:
             text=state.text,
             execution_trace=[*state.execution_trace, f"Transformer(d_model={self.d_model},n_heads={self.n_heads})"],
             moe_metrics=dict(state.moe_metrics),
+            tensor_shape=state.tensor_shape,
         )
