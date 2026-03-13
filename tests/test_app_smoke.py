@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+def test_canonical_config_smoke_through_both_apps(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("hello smoke", encoding="utf-8")
+
+    config_path = tmp_path / "smoke_config.xml"
+    config_path.write_text(_smoke_config_xml(str(docs_dir / "*.txt")), encoding="utf-8")
+
+    extracted = tmp_path / "extracted.jsonl"
+    mixed = tmp_path / "mixed.jsonl"
+    stage_a = tmp_path / "stage_a.jsonl"
+
+    _run([sys.executable, "-m", "distill", "extract", "--config", str(config_path), "--output", str(extracted)])
+    _run([sys.executable, "-m", "distill", "mix", "--config", str(config_path), "--input", str(extracted), "--output", str(mixed)])
+    _run([sys.executable, "-m", "distill", "stage-a", "--config", str(config_path), "--input", str(mixed), "--output", str(stage_a)])
+
+    _run([sys.executable, "-m", "train", "build", "--config", str(config_path)])
+    _run([sys.executable, "-m", "train", "smoke", "--config", str(config_path), "--text", "hello app smoke"])
+
+    assert stage_a.exists()
+
+
+def _run(cmd: list[str]) -> None:
+    subprocess.run(cmd, check=True)
+
+
+def _smoke_config_xml(glob_path: str) -> str:
+    return f"""
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_local">
+        <Source name="local" type="local_text_glob" uri="{glob_path}" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild target_documents="1" random_seed="7" depletion_policy="rebalance">
+      <Group name="g1" percentage="100">
+        <DatasetRef name="set_local" />
+      </Group>
+    </MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="teacher_local">
+          <Backend type="dummy_local">
+            <ModelRef name_or_path="dummy" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+      <StageA enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></StageA>
+      <StageB enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></StageB>
+      <StageC enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></StageC>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="1024" n_heads="8" />
+    <Patcher name="p1" patch_size="128"><Train mode="x"><Optimizer type="adamw" lr="0.001" weight_decay="0.0" /></Train><Transformer /></Patcher>
+    <Trunk name="t1" context="1024"><Train mode="x"><Optimizer type="adamw" lr="0.001" weight_decay="0.0" /></Train><Transformer /></Trunk>
+  </Model>
+</Config>
+"""
