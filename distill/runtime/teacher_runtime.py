@@ -32,17 +32,38 @@ class HuggingFaceBackend:
         self.model_name_or_path = model_name_or_path
         self.execution = execution
         try:
+            import torch  # type: ignore
             from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
         except ImportError as exc:  # pragma: no cover
             raise TeacherRuntimeError("HF backend requires transformers package.") from exc
 
+        precision = execution.get("precision", "")
+        dtype_map = {
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+            "fp32": torch.float32,
+            "float32": torch.float32,
+        }
+        model_kwargs: dict[str, object] = {}
+        if precision in dtype_map:
+            model_kwargs["torch_dtype"] = dtype_map[precision]
+
         self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        self._model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+        self._model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
+
+        self._device = execution.get("device", "cpu")
+        if self._device != "auto":
+            self._model.to(self._device)
+        self._model.eval()
 
     def top_k_next_tokens(self, text: str, k: int) -> list[TopKPrediction]:
         import torch  # type: ignore
 
         encoded = self._tokenizer(text, return_tensors="pt")
+        if self._device != "auto":
+            encoded = {name: tensor.to(self._device) for name, tensor in encoded.items()}
         with torch.no_grad():
             logits = self._model(**encoded).logits[:, -1, :]
             probs = torch.softmax(logits, dim=-1)
@@ -63,7 +84,6 @@ class TeacherRuntime:
 
 
 def build_teacher_runtime(teacher_spec: TeacherSpec) -> TeacherRuntime:
-    # Extension hook: register additional backend types here with explicit adapters.
     backend_type = teacher_spec.backend.backend_type
     if backend_type in {"dummy_local", "local_dummy"}:
         backend = DummyLocalBackend()

@@ -22,6 +22,7 @@ class MixtureDocument:
     split: str
     text: str
     byte_length: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -33,13 +34,12 @@ class TopKPrediction:
 
 @dataclass(frozen=True)
 class StageAOutputRow:
-    document_id: str
-    teacher_name: str
-    group: str
-    dataset_entry: str
-    split: str
-    text: str
-    predictions: List[TopKPrediction]
+    record_id: str
+    doc_id: str
+    prompt_text: str
+    target_text: str
+    top_k_predictions: List[TopKPrediction]
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def dataclass_to_json_dict(obj: Any) -> Dict[str, Any]:
