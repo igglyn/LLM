@@ -19,4 +19,5 @@ class PosEmbeddingBlock:
             text=state.text,
             execution_trace=[*state.execution_trace, "PosEmbedding"],
             moe_metrics=dict(state.moe_metrics),
+            tensor_shape=state.tensor_shape,
         )

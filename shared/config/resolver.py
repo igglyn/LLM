@@ -142,12 +142,16 @@ def _resolve_transformer_block(
 def _resolve_rope_block(raw_block: RoPEBlockSpec, container_defaults: DefaultsSpec) -> ResolvedRoPEBlockSpec:
     d_model = raw_block.d_model if raw_block.d_model is not None else container_defaults.d_model
     n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
+    if d_model is None or n_heads is None:
+        raise ConfigResolutionError("RoPE block missing d_model or n_heads after resolution.")
     return ResolvedRoPEBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
 
 
 def _resolve_drope_block(raw_block: DRopeBlockSpec, container_defaults: DefaultsSpec) -> ResolvedDRopeBlockSpec:
     d_model = raw_block.d_model if raw_block.d_model is not None else container_defaults.d_model
     n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
+    if d_model is None or n_heads is None:
+        raise ConfigResolutionError("DRope block missing d_model or n_heads after resolution.")
     return ResolvedDRopeBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
 
 

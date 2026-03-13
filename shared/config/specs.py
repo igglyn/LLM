@@ -257,15 +257,15 @@ class ResolvedTransformerBlockSpec:
 
 @dataclass(frozen=True)
 class ResolvedRoPEBlockSpec:
-    d_model: Optional[int]
-    n_heads: Optional[int]
+    d_model: int
+    n_heads: int
     attributes: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ResolvedDRopeBlockSpec:
-    d_model: Optional[int]
-    n_heads: Optional[int]
+    d_model: int
+    n_heads: int
     attributes: Dict[str, str] = field(default_factory=dict)
 
 
