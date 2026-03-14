@@ -21,6 +21,7 @@ from shared.config.specs import (
 
 
 EXAMPLE_CONFIG_PATH = Path("examples/config.example.xml")
+HF_EXAMPLE_CONFIG_PATH = Path("examples/config.hf.example.xml")
 
 
 def test_parse_example_config_smoke() -> None:
@@ -33,6 +34,14 @@ def test_parse_example_config_smoke() -> None:
     assert config.model.trunk is not None
     assert len(config.model.trunk.mix_of_experts_blocks) == 1
     assert len(config.model.trunk.mix_of_experts_blocks[0].experts) == 1
+
+
+def test_parse_hf_example_config_smoke() -> None:
+    config = parse_config(HF_EXAMPLE_CONFIG_PATH)
+
+    assert len(config.dataset.source_extraction.dataset_entries) == 1
+    assert config.dataset.source_extraction.dataset_entries[0].source.source_type == "huggingface"
+    assert config.dataset.distillation.teachers.teachers[0].backend.backend_type == "huggingface"
 
 
 def test_scheduler_list_preserves_order() -> None:

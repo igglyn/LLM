@@ -63,6 +63,28 @@ python -m train smoke --config examples/config.example.xml
 pytest
 ```
 
+
+## Hugging Face examples
+
+A full Hugging Face-based example config is available at `examples/config.hf.example.xml`.
+It demonstrates both:
+- dataset extraction via `<Source type="huggingface" ... />`
+- teacher model runner via `<Backend type="huggingface"> ... </Backend>`
+
+Example commands:
+
+```bash
+# distill with Hugging Face dataset + model backend
+python -m distill extract --config examples/config.hf.example.xml --output /tmp/hf_extracted.jsonl
+python -m distill mix --config examples/config.hf.example.xml --input /tmp/hf_extracted.jsonl --output /tmp/hf_mixed.jsonl
+python -m distill stage-a --config examples/config.hf.example.xml --input /tmp/hf_mixed.jsonl --output /tmp/hf_stage_a.jsonl
+
+# train runtime bring-up on the same config
+python -m train build --config examples/config.hf.example.xml
+python -m train summary --config examples/config.hf.example.xml
+python -m train smoke --config examples/config.hf.example.xml
+```
+
 ## Extension hooks
 
 - Add new XML block types in parser + specs + runtime composition helpers.
