@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="hf_wikitext">
+        <Source
+          name="hf-dataset"
+          type="huggingface"
+          uri="wikitext"
+          split="train"
+          text_column="text"
+        />
+        <SplitMapping>
+          <Map from="train" to="train" />
+        </SplitMapping>
+        <Filter type="min_bytes" value="32" />
+      </DatasetEntry>
+    </SourceExtraction>
+
+    <MixtureBuild strategy="weighted">
+      <Group name="hf_group" percentage="100">
+        <DatasetRef name="hf_wikitext" />
+      </Group>
+    </MixtureBuild>
+
+    <Distillation objective="logits+structure">
+      <Teachers>
+        <Teacher name="teacher_hf">
+          <Backend type="huggingface">
+            <ModelRef name_or_path="gpt2" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+
+      <StageA enabled="true" teacher_ref="teacher_hf">
+        <TopKLogits k="8" temperature="1.0" />
+      </StageA>
+      <StageB enabled="false" teacher_ref="teacher_hf">
+        <LongContext max_tokens="2048" packing="false" />
+      </StageB>
+      <StageC enabled="false" teacher_ref="teacher_hf">
+        <StructuredOutputs schema="json" strict="false" />
+      </StageC>
+    </Distillation>
+  </Dataset>
+
+  <Model>
+    <Defaults d_model="768" n_heads="12" />
+
+    <Patcher name="patcher_text" patch_size="128">
+      <Train mode="finetune">
+        <Optimizer type="adamw" lr="0.0003" weight_decay="0.1">
+          <Scheduler type="cosine" t_max="1000" min_lr="0.00001" />
+        </Optimizer>
+      </Train>
+      <RoPE base="10000" />
+      <Transformer layers="2" hidden_size="768" />
+    </Patcher>
+
+    <Trunk name="main_trunk" context="2048">
+      <Train mode="full">
+        <Optimizer type="adamw" lr="0.0001" weight_decay="0.1">
+          <Scheduler type="cosine" t_max="5000" min_lr="0.000005" />
+        </Optimizer>
+      </Train>
+      <DRope scale="1.0" />
+      <Transformer layers="6" hidden_size="768" />
+    </Trunk>
+  </Model>
+</Config>
