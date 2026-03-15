@@ -239,6 +239,8 @@ def test_trunk_child_block_order_accepts_rope_and_pos_embedding(tmp_path: Path) 
 
 
 
+
+
 def test_vocab_embedding_parses_and_preserves_order(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',
