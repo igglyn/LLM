@@ -170,8 +170,8 @@ def test_build_preserves_small_configured_d_model_and_n_heads(tmp_path: Path) ->
     meta = payload['meta']
 
     assert (meta['d_model'], meta['n_heads']) == (384, 6)
-    assert meta['prediction_target'] == 'latent_state'
-    assert meta['latent_dim'] == 256
+    assert meta['prediction_target'] == 'input_reconstruction_plus_next_token'
+    assert meta['latent_dim'] == 384
     assert meta['decoder_head'] == 'token_logits_for_inference'
 
 
