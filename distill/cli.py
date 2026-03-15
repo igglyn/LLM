@@ -7,6 +7,7 @@ from pathlib import Path
 from shared.config import parse_config
 
 from .runtime.pipeline import run_extract, run_mix, run_stage_a_command
+from .teacher_vocab import teacher_vocab_size
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     summary = sub.add_parser("summary")
     summary.add_argument("--config", required=True)
 
+    teacher_vocab = sub.add_parser("teacher-vocab")
+    teacher_vocab.add_argument("--config", required=True)
+
     return parser
 
 
@@ -45,6 +49,22 @@ def main() -> None:
             f"teachers={len(config.dataset.distillation.teachers.teachers)}",
             sep=" ",
         )
+        return
+
+
+    if args.command == "teacher-vocab":
+        config = parse_config(args.config)
+        for teacher in config.dataset.distillation.teachers.teachers:
+            result = teacher_vocab_size(teacher)
+            print(
+                "teacher_vocab",
+                f"teacher={result.teacher_name}",
+                f"backend={result.backend_type}",
+                f"model={result.model_name_or_path}",
+                f"vocab_size={result.vocab_size if result.vocab_size is not None else 'unknown'}",
+                f"source={result.source}",
+                sep=" ",
+            )
         return
 
     if args.command == "extract":

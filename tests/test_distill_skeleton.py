@@ -12,6 +12,7 @@ from distill.extraction import run_extraction
 from distill.schemas import MixtureEntry, NormalizedDocument
 from distill.stages.stage_a import StageAError, run_stage_a
 from distill.teachers import teacher_by_ref
+from distill.teacher_vocab import teacher_vocab_size
 from shared.config import parse_config, resolve_config
 
 
@@ -208,3 +209,59 @@ def _hf_config_xml(*, max_entries: str | None = None, dataset_config: str | None
   </Model>
 </Config>
 """
+
+
+def test_cli_teacher_vocab_for_dummy_backend(tmp_path: Path) -> None:
+    config = tmp_path / "config.xml"
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.txt").write_text("hello", encoding="utf-8")
+    config.write_text(_config_xml(str(docs / "*.txt")), encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "distill", "teacher-vocab", "--config", str(config)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "teacher=teacher_local" in completed.stdout
+    assert "backend=dummy_local" in completed.stdout
+    assert "vocab_size=unknown" in completed.stdout
+
+
+def test_teacher_vocab_size_uses_hf_config_vocab_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_transformers = ModuleType("transformers")
+
+    class FakeConfig:
+        vocab_size = 64000
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_name_or_path: str):
+            assert model_name_or_path == "fake-model"
+            return FakeConfig()
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_name_or_path: str):
+            raise AssertionError("tokenizer fallback should not be used when config.vocab_size exists")
+
+    fake_transformers.AutoConfig = FakeAutoConfig  # type: ignore[attr-defined]
+    fake_transformers.AutoTokenizer = FakeAutoTokenizer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    config = tmp_path / "hf_teacher_config.xml"
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.txt").write_text("hello", encoding="utf-8")
+    xml = _config_xml(str(docs / "*.txt")).replace('type=\"dummy_local\"', 'type=\"huggingface\"').replace('name_or_path=\"dummy\"', 'name_or_path=\"fake-model\"')
+    config.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(config)
+    teacher = parsed.dataset.distillation.teachers.teachers[0]
+    result = teacher_vocab_size(teacher)
+
+    assert result.vocab_size == 64000
+    assert result.source == "config.vocab_size"
+
