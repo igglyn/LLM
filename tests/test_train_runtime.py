@@ -6,6 +6,8 @@ from shared.config import parse_config, resolve_config
 from train.blocks import MixOfExpertsBlock
 from train.builder import build_model_runtime
 from train.metrics import summarize_model_runtime
+from train.runtime import _is_offset_step
+from train.specs import RuntimeSchedulerConfig
 
 
 EXAMPLE_CONFIG_PATH = Path("examples/config.example.xml")
@@ -56,3 +58,12 @@ def test_transformer_layers_expand_runtime_block_counts() -> None:
 
 def _build_runtime(config_path: Path):
     return build_model_runtime(resolve_config(parse_config(config_path)))
+
+
+def test_offset_scheduler_marks_skip_range() -> None:
+    schedulers = [RuntimeSchedulerConfig(scheduler_type="offset", attributes={"min_step": "2", "max_step": "5"})]
+
+    assert _is_offset_step(schedulers, step=1) is False
+    assert _is_offset_step(schedulers, step=2) is True
+    assert _is_offset_step(schedulers, step=4) is True
+    assert _is_offset_step(schedulers, step=5) is False
