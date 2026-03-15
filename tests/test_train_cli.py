@@ -46,6 +46,52 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     assert summary_obj['trunk']['name'] == 'main_trunk'
 
 
+def test_run_uses_trained_artifact(tmp_path: Path) -> None:
+    config_path = Path('examples/config.example.xml')
+    dataset_file = tmp_path / 'dataset.jsonl'
+    dataset_file.write_text('{"text":"sample one"}\n{"text":"sample two"}\n', encoding='utf-8')
+    output_dir = tmp_path / 'model'
+    model_file = output_dir / 'model.json'
+
+    subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--dataset-file',
+            str(dataset_file),
+            '--output-dir',
+            str(output_dir),
+        ],
+        check=True,
+    )
+
+    output = subprocess.check_output(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'run',
+            '--config',
+            str(config_path),
+            '--model-file',
+            str(model_file),
+            '--text',
+            'run payload',
+        ],
+        text=True,
+    )
+    result = json.loads(output)
+
+    assert result['text'] == 'run payload'
+    assert isinstance(result['score'], float)
+    assert result['d_model'] > 0
+    assert 'TrunkEnd(main_trunk)' in result['trace']
+
+
 def test_package_writes_manifest_only(tmp_path: Path) -> None:
     config_path = Path('examples/config.example.xml')
     dataset_file = tmp_path / 'dataset.jsonl'

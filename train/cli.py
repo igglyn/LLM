@@ -4,7 +4,7 @@ import argparse
 import json
 
 from train.artifacts import read_model_artifact, write_build_artifact, write_training_artifact
-from train.runtime import load_model_runtime, run_smoke, train_model
+from train.runtime import load_model_runtime, run_smoke, run_trained_model, train_model
 
 
 def main() -> None:
@@ -20,6 +20,11 @@ def main() -> None:
     package_parser.add_argument('--config', required=True, help='Path to XML config')
     package_parser.add_argument('--dataset-file', required=True, help='Path to prepared dataset file')
     package_parser.add_argument('--output-dir', required=True, help='Directory where the model manifest artifact is written')
+
+    run_parser = subparsers.add_parser('run')
+    run_parser.add_argument('--config', required=True, help='Path to XML config')
+    run_parser.add_argument('--model-file', required=True, help='Path to trained model artifact containing weights_file')
+    run_parser.add_argument('--text', default='hello train runtime', help='Text payload for runtime routing context')
 
     summary_parser = subparsers.add_parser('summary')
     summary_parser.add_argument('--model-file', required=True, help='Path to a built model artifact')
@@ -60,6 +65,14 @@ def main() -> None:
             output_dir=args.output_dir,
         )
         print(f'package completed: model_file={model_file}')
+    elif args.command == 'run':
+        model_runtime = load_model_runtime(args.config)
+        model_artifact = read_model_artifact(args.model_file)
+        weights_file = model_artifact.get('weights_file')
+        if not isinstance(weights_file, str):
+            raise ValueError('model artifact does not contain a weights_file. Use `train build` output.')
+        result = run_trained_model(model_runtime=model_runtime, weights_file=weights_file, text=args.text)
+        print(json.dumps(result, indent=2))
     elif args.command == 'summary':
         model_artifact = read_model_artifact(args.model_file)
         print(json.dumps(model_artifact['summary'], indent=2))

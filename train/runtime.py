@@ -64,6 +64,29 @@ def train_model(model_runtime: ModelRuntime, dataset_file: str, output_dir: str,
     }
 
 
+def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str) -> dict[str, Any]:
+    d_model = _infer_d_model(model_runtime)
+    saved = torch.load(weights_file, map_location='cpu')
+    weights = saved.get('weights')
+    if not isinstance(weights, torch.Tensor):
+        raise ValueError(f'weights file is missing tensor: {weights_file}')
+    if weights.numel() != d_model:
+        raise ValueError(f'weights dimension mismatch: expected={d_model} got={weights.numel()}')
+
+    state = model_runtime.forward_dummy(batch_size=1, seq_len=1, d_model=d_model)
+    features = state.tensor.reshape(-1)
+    logits = features * torch.tanh(weights.reshape(-1))
+    score = float(torch.mean(logits).detach().cpu())
+
+    return {
+        'text': text,
+        'score': score,
+        'd_model': d_model,
+        'trace': state.execution_trace,
+        'moe_metrics': state.moe_metrics,
+    }
+
+
 def _infer_d_model(model_runtime: ModelRuntime) -> int:
     for patcher in model_runtime.patchers:
         for block in patcher.blocks:
@@ -109,4 +132,5 @@ __all__ = [
     'run_smoke',
     'run_dummy_forward',
     'train_model',
+    'run_trained_model',
 ]
