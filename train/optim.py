@@ -10,7 +10,7 @@ def runtime_train_config_from_spec(train_spec: TrainSpec) -> RuntimeTrainConfig:
         for s in train_spec.optimizer.schedulers
     ]
     return RuntimeTrainConfig(
-        mode=train_spec.mode,
+        steps=train_spec.steps,
         optimizer_type=train_spec.optimizer.optimizer_type,
         lr=train_spec.optimizer.lr,
         weight_decay=train_spec.optimizer.weight_decay,

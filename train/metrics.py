@@ -8,7 +8,7 @@ from train.specs import ModelRuntime, RuntimeTrainConfig
 
 def _train_summary(config: RuntimeTrainConfig) -> dict[str, Any]:
     return {
-        "mode": config.mode,
+        "steps": config.steps,
         "optimizer": {
             "type": config.optimizer_type,
             "lr": config.lr,

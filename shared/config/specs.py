@@ -146,7 +146,7 @@ class OptimizerSpec:
 
 @dataclass(frozen=True)
 class TrainSpec:
-    mode: str
+    steps: int
     optimizer: OptimizerSpec
 
 

@@ -29,7 +29,7 @@ Boundary rule:
 - dataset logical structure (entries, source kind, split mapping, filters)
 - distillation structure (teachers, stages, stage modes)
 - model structure (defaults, patchers, trunk, block composition)
-- train config structure (train mode, optimizer, scheduler definitions)
+- train config structure (train steps, optimizer, scheduler definitions)
 
 ### Keep out of XML (use `.env`, CLI args, sidecar local config)
 - machine-local paths for outputs/artifacts

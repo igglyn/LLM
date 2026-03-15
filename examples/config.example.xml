@@ -63,10 +63,11 @@
     <Defaults d_model="4096" n_heads="32" />
 
     <Patcher name="patcher_text" patch_size="256">
-      <Train mode="finetune">
+      <Train steps="20000">
         <Optimizer type="adamw" lr="0.0003" weight_decay="0.1">
-          <Scheduler type="cosine" t_max="20000" min_lr="0.00001" />
-          <Scheduler type="loss_threshold" monitor="val_loss" threshold="1.8" decay_factor="0.5" />
+          <Scheduler type="warmup" start_step="0" end_step="1000" min_lr="0.0" max_lr="0.0003" />
+          <Scheduler type="cosine" start_step="1000" end_step="20000" min_lr="0.00001" />
+          <Scheduler type="loss_threshold" start_step="0" end_step="20000" monitor="val_loss" threshold="1.8" decay_factor="0.5" />
         </Optimizer>
       </Train>
       <RoPE base="10000" scale="1.0" />
@@ -75,10 +76,11 @@
     </Patcher>
 
     <Patcher name="patcher_code" patch_size="512">
-      <Train mode="finetune">
+      <Train steps="15000">
         <Optimizer type="adamw" lr="0.0002" weight_decay="0.05">
-          <Scheduler type="cosine" t_max="15000" min_lr="0.00001" />
-          <Scheduler type="loss_threshold" monitor="train_loss" threshold="1.2" decay_factor="0.7" />
+          <Scheduler type="warmup" start_step="0" end_step="750" min_lr="0.0" max_lr="0.0002" />
+          <Scheduler type="cosine" start_step="750" end_step="15000" min_lr="0.00001" />
+          <Scheduler type="loss_threshold" start_step="0" end_step="15000" monitor="train_loss" threshold="1.2" decay_factor="0.7" />
         </Optimizer>
       </Train>
       <PosEmbedding type="learned" />
@@ -87,9 +89,10 @@
     </Patcher>
 
     <Trunk name="main_trunk" context="32768">
-      <Train mode="full">
+      <Train steps="50000">
         <Optimizer type="adamw" lr="0.0001" weight_decay="0.1">
-          <Scheduler type="cosine" t_max="50000" min_lr="0.000005" />
+          <Scheduler type="warmup" start_step="0" end_step="2000" min_lr="0.0" max_lr="0.0001" />
+          <Scheduler type="cosine" start_step="2000" end_step="50000" min_lr="0.000005" />
         </Optimizer>
       </Train>
       <DRope base="10000" scale="2.0" />
