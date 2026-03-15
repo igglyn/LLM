@@ -280,7 +280,7 @@ class _TrainLanguageModel(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(d_model)
-        self.latent_dim = min(256, d_model)
+        self.latent_dim = d_model
         self.latent_head = nn.Linear(d_model, self.latent_dim)
         self.latent_to_model = nn.Linear(self.latent_dim, d_model)
         self.head = nn.Linear(d_model, vocab_size)
