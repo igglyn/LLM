@@ -59,7 +59,7 @@ def train_model(
     transformer_layer_count = _count_transformer_layers(model_runtime)
     moe_expert_count = _count_moe_experts(model_runtime)
 
-    model = _TrainLanguageModel(
+    trunk_model = _TrainLanguageModel(
         vocab_size=vocab_size,
         d_model=d_model,
         max_seq_len=max_seq_len,
@@ -69,64 +69,117 @@ def train_model(
         n_heads=n_heads,
         moe_expert_count=moe_expert_count,
     )
-    optimizer = _build_optimizer(
+    trunk_optimizer = _build_optimizer(
         optimizer_type=optimizer_type,
-        parameters=model.parameters(),
+        parameters=trunk_model.parameters(),
         weight_decay=model_runtime.trunk.train_config.weight_decay,
     )
-    schedule_fn = _build_schedule_fn(model_runtime.trunk.train_config.schedulers, total_steps=steps)
+    trunk_schedule_fn = _build_schedule_fn(model_runtime.trunk.train_config.schedulers, total_steps=steps)
+
+    patcher_layer_count = _count_patcher_transformer_layers(model_runtime)
+    patcher_train_config = model_runtime.patchers[0].train_config if model_runtime.patchers else model_runtime.trunk.train_config
+    patcher_model = _TrainLanguageModel(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        max_seq_len=max_seq_len,
+        use_vocab_embedding=has_vocab_embedding,
+        use_positional_embedding=has_pos_embedding,
+        transformer_layers=max(1, patcher_layer_count),
+        n_heads=n_heads,
+        moe_expert_count=0,
+    )
+    patcher_optimizer = _build_optimizer(
+        optimizer_type=patcher_train_config.optimizer_type,
+        parameters=patcher_model.parameters(),
+        weight_decay=patcher_train_config.weight_decay,
+    )
+    patcher_schedule_fn = _build_schedule_fn(patcher_train_config.schedulers, total_steps=steps)
 
     start_step = 0
     if resume_from:
-        start_step = _resume_training_state(model=model, optimizer=optimizer, checkpoint_file=resume_from)
+        start_step = _resume_training_state(
+            trunk_model=trunk_model,
+            trunk_optimizer=trunk_optimizer,
+            patcher_model=patcher_model,
+            patcher_optimizer=patcher_optimizer,
+            checkpoint_file=resume_from,
+        )
 
     checkpoints_dir = output_path / "checkpoints"
     checkpoint_files: list[str] = []
 
     losses: list[float] = []
+    trunk_losses: list[float] = []
+    patcher_losses: list[float] = []
     for step in range(start_step, steps):
-        batch_sequences = [
+        trunk_batch_sequences = [
             sequences[(step * configured_batch_size + batch_index) % len(sequences)]
             for batch_index in range(configured_batch_size)
         ]
-        input_ids, target_ids = _next_token_batch(batch_sequences, pad_id=token_to_id["<pad>"])
+        patcher_batch_size = max(1, patcher_train_config.batch_size)
+        patcher_batch_sequences = [
+            sequences[(step * patcher_batch_size + batch_index) % len(sequences)]
+            for batch_index in range(patcher_batch_size)
+        ]
+        trunk_input_ids, target_ids = _next_token_batch(trunk_batch_sequences, pad_id=token_to_id["<pad>"])
+        patcher_input_ids, _ = _next_token_batch(patcher_batch_sequences, pad_id=token_to_id["<pad>"])
 
-        current_lr = schedule_fn(step)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = current_lr
+        trunk_lr = trunk_schedule_fn(step)
+        for param_group in trunk_optimizer.param_groups:
+            param_group["lr"] = trunk_lr
 
-        next_token_logits = model(input_ids)
-        patcher_reconstruction_loss = _masked_token_cross_entropy(
-            logits=next_token_logits,
-            target_ids=input_ids,
+        patcher_lr = patcher_schedule_fn(step)
+        for param_group in patcher_optimizer.param_groups:
+            param_group["lr"] = patcher_lr
+
+        patcher_logits = patcher_model.reconstruct_logits(patcher_input_ids)
+        patcher_loss = _masked_token_cross_entropy(
+            logits=patcher_logits,
+            target_ids=patcher_input_ids,
             pad_id=token_to_id["<pad>"],
         )
+        patcher_optimizer.zero_grad()
+        patcher_loss.backward()
+        patcher_optimizer.step()
+
+        next_token_logits = trunk_model(trunk_input_ids)
         next_token_loss = _masked_token_cross_entropy(
             logits=next_token_logits,
             target_ids=target_ids,
             pad_id=token_to_id["<pad>"],
         )
-        loss = patcher_reconstruction_loss + next_token_loss
+        loss = patcher_loss + next_token_loss
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        trunk_optimizer.zero_grad()
+        next_token_loss.backward()
+        trunk_optimizer.step()
 
         detached_loss = float(loss.detach().cpu())
+        detached_trunk_loss = float(next_token_loss.detach().cpu())
+        detached_patcher_loss = float(patcher_loss.detach().cpu())
         losses.append(detached_loss)
+        trunk_losses.append(detached_trunk_loss)
+        patcher_losses.append(detached_patcher_loss)
 
         if log_every_steps > 0 and (step + 1) % log_every_steps == 0:
-            print(f"step={step + 1} loss={detached_loss:.6f} lr={current_lr:.8f}")
+            print(
+                f"step={step + 1} loss={detached_loss:.6f} trunk_loss={detached_trunk_loss:.6f} "
+                f"patcher_loss={detached_patcher_loss:.6f} trunk_lr={trunk_lr:.8f} patcher_lr={patcher_lr:.8f}"
+            )
 
         if save_every > 0 and (step + 1) % save_every == 0:
             checkpoints_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_path = checkpoints_dir / f"checkpoint_step_{step + 1}.pt"
             torch.save(
                 {
-                    "model_state": model.state_dict(),
-                    "optimizer_state": optimizer.state_dict(),
+                    "model_state": trunk_model.state_dict(),
+                    "optimizer_state": trunk_optimizer.state_dict(),
+                    "patcher_model_state": patcher_model.state_dict(),
+                    "patcher_optimizer_state": patcher_optimizer.state_dict(),
                     "step": step + 1,
                     "loss": detached_loss,
+                    "trunk_loss": detached_trunk_loss,
+                    "patcher_loss": detached_patcher_loss,
                 },
                 checkpoint_path,
             )
@@ -135,7 +188,8 @@ def train_model(
     weights_file = output_path / "weights.pt"
     torch.save(
         {
-            "model_state": model.state_dict(),
+            "model_state": trunk_model.state_dict(),
+            "patcher_model_state": patcher_model.state_dict(),
             "meta": {
                 "vocab_size": vocab_size,
                 "d_model": d_model,
@@ -158,8 +212,8 @@ def train_model(
                     {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
                     for scheduler in model_runtime.trunk.train_config.schedulers
                 ],
-                "prediction_target": "input_reconstruction_plus_next_token",
-                "latent_dim": model.latent_dim,
+                "prediction_target": "separate_patcher_and_trunk_objectives",
+                "latent_dim": trunk_model.latent_dim,
                 "decoder_head": "token_logits_for_inference",
             },
         },
@@ -168,6 +222,10 @@ def train_model(
 
     initial_loss = losses[0] if losses else 0.0
     final_loss = losses[-1] if losses else 0.0
+    initial_trunk_loss = trunk_losses[0] if trunk_losses else 0.0
+    final_trunk_loss = trunk_losses[-1] if trunk_losses else 0.0
+    initial_patcher_loss = patcher_losses[0] if patcher_losses else 0.0
+    final_patcher_loss = patcher_losses[-1] if patcher_losses else 0.0
 
     return {
         "configured_steps": configured_steps,
@@ -188,6 +246,10 @@ def train_model(
         "config_n_heads": config_n_heads,
         "initial_loss": initial_loss,
         "final_loss": final_loss,
+        "initial_trunk_loss": initial_trunk_loss,
+        "final_trunk_loss": final_trunk_loss,
+        "initial_patcher_loss": initial_patcher_loss,
+        "final_patcher_loss": final_patcher_loss,
         "weights_file": str(weights_file),
     }
 
@@ -414,14 +476,27 @@ def _build_schedule_fn(schedulers: list[RuntimeSchedulerConfig], total_steps: in
     return _lr
 
 
-def _resume_training_state(model: nn.Module, optimizer: torch.optim.Optimizer, checkpoint_file: str) -> int:
+def _resume_training_state(
+    trunk_model: nn.Module,
+    trunk_optimizer: torch.optim.Optimizer,
+    patcher_model: nn.Module,
+    patcher_optimizer: torch.optim.Optimizer,
+    checkpoint_file: str,
+) -> int:
     payload = torch.load(checkpoint_file, map_location="cpu")
     model_state = payload.get("model_state")
     optimizer_state = payload.get("optimizer_state")
     if not isinstance(model_state, dict) or not isinstance(optimizer_state, dict):
         raise ValueError(f"checkpoint file is missing model/optimizer states: {checkpoint_file}")
-    model.load_state_dict(model_state)
-    optimizer.load_state_dict(optimizer_state)
+    trunk_model.load_state_dict(model_state)
+    trunk_optimizer.load_state_dict(optimizer_state)
+
+    patcher_model_state = payload.get("patcher_model_state")
+    patcher_optimizer_state = payload.get("patcher_optimizer_state")
+    if isinstance(patcher_model_state, dict) and isinstance(patcher_optimizer_state, dict):
+        patcher_model.load_state_dict(patcher_model_state)
+        patcher_optimizer.load_state_dict(patcher_optimizer_state)
+
     return int(payload.get("step", 0))
 
 
@@ -434,6 +509,13 @@ def _count_transformer_layers(model_runtime: ModelRuntime) -> int:
         if isinstance(block, MixOfExpertsBlock):
             for expert in block.experts:
                 count += sum(1 for inner in expert.blocks if isinstance(inner, TransformerBlock))
+    return max(1, count)
+
+
+def _count_patcher_transformer_layers(model_runtime: ModelRuntime) -> int:
+    count = 0
+    for patcher in model_runtime.patchers:
+        count += sum(1 for block in patcher.blocks if isinstance(block, TransformerBlock))
     return max(1, count)
 
 

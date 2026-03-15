@@ -78,6 +78,10 @@ def main() -> None:
                 'used_positional_embedding': training['used_positional_embedding'],
                 'initial_loss': training['initial_loss'],
                 'final_loss': training['final_loss'],
+                'initial_trunk_loss': training['initial_trunk_loss'],
+                'final_trunk_loss': training['final_trunk_loss'],
+                'initial_patcher_loss': training['initial_patcher_loss'],
+                'final_patcher_loss': training['final_patcher_loss'],
             },
         )
         print(

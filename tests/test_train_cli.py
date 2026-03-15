@@ -287,6 +287,8 @@ def test_build_log_every_prints_step_loss_and_lr(tmp_path: Path) -> None:
     assert 'step=2 loss=' in completed.stdout
     assert 'lr=' in completed.stdout
     assert 'step=4 loss=' in completed.stdout
+    assert 'trunk_loss=' in completed.stdout
+    assert 'patcher_loss=' in completed.stdout
 
 def _write_distill_dir(tmp_path: Path) -> Path:
     distill_dir = tmp_path / 'distill'
