@@ -76,6 +76,21 @@ def test_train_requires_scheduler_step_coverage(tmp_path: Path) -> None:
         parse_config(path)
 
 
+def test_optimizer_lr_is_optional_when_explicitly_removed(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace(' lr="0.001"', '', 1).replace(' lr="0.0005"', '', 1)
+    path = tmp_path / "optimizer_without_lr.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(path)
+    assert parsed.model.patchers[0].train.optimizer.lr is None
+    assert parsed.model.trunk.train.optimizer.lr is None
+
+
 def test_train_requires_scheduler_ranges(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',

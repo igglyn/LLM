@@ -29,7 +29,7 @@ class RuntimeSchedulerConfig:
 class RuntimeTrainConfig:
     steps: int
     optimizer_type: str
-    lr: float
+    lr: float | None
     weight_decay: float
     schedulers: List[RuntimeSchedulerConfig]
 
