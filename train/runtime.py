@@ -391,6 +391,33 @@ def _load_token_mapping(distill_root: Path, texts: list[str]) -> tuple[dict[str,
             mapping = {token: idx for idx, token in enumerate(raw)}
             return _ensure_special_tokens(mapping), str(path)
 
+    for name in ["token_mapping.jsonl", "token_mappings.jsonl", "token_definitions.jsonl"]:
+        path = distill_root / name
+        if not path.exists():
+            continue
+
+        mapping: dict[str, int] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            row = json.loads(stripped)
+            if not isinstance(row, dict):
+                continue
+
+            token = row.get("token")
+            mapped_id = row.get("mapped_id")
+            if isinstance(token, str) and isinstance(mapped_id, int):
+                mapping[token] = mapped_id
+                continue
+
+            token_id = row.get("id")
+            if isinstance(token, str) and isinstance(token_id, int):
+                mapping[token] = token_id
+
+        if mapping:
+            return _ensure_special_tokens(mapping), str(path)
+
     built = {"<pad>": 0, "<unk>": 1}
     for text in texts:
         for token in text.split():

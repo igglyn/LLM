@@ -131,6 +131,57 @@ def test_package_writes_manifest_only(tmp_path: Path) -> None:
     assert 'training' not in artifact
 
 
+def test_build_reads_jsonl_token_mapping_from_distill_dir(tmp_path: Path) -> None:
+    config_path = Path('examples/config.example.xml')
+    distill_dir = tmp_path / 'distill'
+    distill_dir.mkdir(parents=True, exist_ok=True)
+    (distill_dir / 'stage_a.jsonl').write_text(
+        '\n'.join(
+            [
+                json.dumps({'prompt_text': 'hello world', 'target_text': 'again'}),
+                json.dumps({'prompt_text': 'code completion', 'target_text': 'rocks'}),
+            ]
+        )
+        + '\n',
+        encoding='utf-8',
+    )
+    (distill_dir / 'token_mapping.jsonl').write_text(
+        '\n'.join(
+            [
+                json.dumps({'token': '<pad>', 'mapped_id': 0}),
+                json.dumps({'token': '<unk>', 'mapped_id': 1}),
+                json.dumps({'token': 'hello', 'mapped_id': 2}),
+                json.dumps({'token': 'world', 'mapped_id': 3}),
+            ]
+        )
+        + '\n',
+        encoding='utf-8',
+    )
+
+    output_dir = tmp_path / 'model'
+    model_file = output_dir / 'model.json'
+    subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--distill-dir',
+            str(distill_dir),
+            '--output-dir',
+            str(output_dir),
+            '--max-steps',
+            '10',
+        ],
+        check=True,
+    )
+
+    artifact = json.loads(model_file.read_text(encoding='utf-8'))
+    assert artifact['training']['token_mapping_file'] == str(distill_dir / 'token_mapping.jsonl')
+
+
 def _write_distill_dir(tmp_path: Path) -> Path:
     distill_dir = tmp_path / 'distill'
     distill_dir.mkdir(parents=True, exist_ok=True)
