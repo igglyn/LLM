@@ -254,7 +254,12 @@ def train_model(
     }
 
 
-def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str) -> dict[str, Any]:
+def run_trained_model(
+    model_runtime: ModelRuntime,
+    weights_file: str,
+    text: str,
+    max_new_tokens: int = 1,
+) -> dict[str, Any]:
     payload = torch.load(weights_file, map_location="cpu")
     state_dict = payload.get("model_state")
     meta = payload.get("meta", {})
@@ -297,19 +302,32 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
     model.eval()
 
     encoded = _encode_texts([text], {str(k): int(v) for k, v in token_to_id.items()}, max_tokens=max_seq_len)[0]
-    input_ids, _ = _next_token_batch([encoded], pad_id=int(meta.get("pad_id", 0)))
+    pad_id = int(meta.get("pad_id", 0))
 
-    with torch.no_grad():
-        logits = model(input_ids)
-    next_token_id = int(torch.argmax(logits[0, -1]).item())
+    generated_ids: list[int] = []
+    generated_scores: list[float] = []
+    for _ in range(max(0, max_new_tokens)):
+        window = encoded[-max_seq_len:]
+        input_ids, _ = _next_token_batch([window], pad_id=pad_id)
+        with torch.no_grad():
+            logits = model(input_ids)
+
+        next_token_logits = logits[0, -1]
+        next_token_id = int(torch.argmax(next_token_logits).item())
+        encoded.append(next_token_id)
+        generated_ids.append(next_token_id)
+        generated_scores.append(float(torch.max(next_token_logits).item()))
+
     id_to_token = {int(v): str(k) for k, v in token_to_id.items()}
+    generated_tokens = [id_to_token.get(token_id, "<unk>") for token_id in generated_ids]
 
     state = model_runtime.smoke(text)
     return {
         "text": text,
-        "predicted_token": id_to_token.get(next_token_id, "<unk>"),
-        "predicted_token_id": next_token_id,
-        "score": float(torch.max(logits[0, -1]).item()),
+        "predicted_tokens": generated_tokens,
+        "predicted_token_ids": generated_ids,
+        "scores": generated_scores,
+        "max_new_tokens": max(0, max_new_tokens),
         "d_model": d_model,
         "used_vocab_embedding": use_vocab_embedding,
         "transformer_layers": transformer_layers,
