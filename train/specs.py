@@ -35,6 +35,7 @@ class RuntimeTrainConfig:
     save_every: int
     optimizer_type: str
     weight_decay: float
+    dropout: float
     schedulers: List[RuntimeSchedulerConfig]
 
 

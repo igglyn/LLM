@@ -387,6 +387,7 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
     optimizer = OptimizerSpec(
         optimizer_type=_required_attr(optimizer_elem, "type"),
         weight_decay=float(_required_attr(optimizer_elem, "weight_decay")),
+        dropout=float(optimizer_elem.attrib.get("dropout", "0.0")),
         schedulers=schedulers,
     )
     return TrainSpec(steps=train_steps, batch_size=batch_size, save_every=save_every, optimizer=optimizer)

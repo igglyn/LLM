@@ -140,6 +140,7 @@ class SchedulerSpec:
 class OptimizerSpec:
     optimizer_type: str
     weight_decay: float
+    dropout: float = 0.0
     schedulers: List[SchedulerSpec] = field(default_factory=list)
 
 

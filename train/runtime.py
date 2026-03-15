@@ -68,6 +68,7 @@ def train_model(
         transformer_layers=transformer_layer_count,
         n_heads=n_heads,
         moe_expert_count=moe_expert_count,
+        dropout=model_runtime.trunk.train_config.dropout,
     )
     trunk_optimizer = _build_optimizer(
         optimizer_type=optimizer_type,
@@ -87,6 +88,7 @@ def train_model(
         transformer_layers=max(1, patcher_layer_count),
         n_heads=n_heads,
         moe_expert_count=0,
+        dropout=patcher_train_config.dropout,
     )
     patcher_optimizer = _build_optimizer(
         optimizer_type=patcher_train_config.optimizer_type,
@@ -360,6 +362,7 @@ class _TrainLanguageModel(nn.Module):
         transformer_layers: int,
         n_heads: int,
         moe_expert_count: int,
+        dropout: float,
     ) -> None:
         super().__init__()
         self.vocab_embedding = nn.Embedding(vocab_size, d_model) if use_vocab_embedding else None
@@ -371,6 +374,7 @@ class _TrainLanguageModel(nn.Module):
                     d_model=d_model,
                     n_heads=n_heads,
                     moe_expert_count=moe_expert_count,
+                    dropout=dropout,
                 )
                 for _ in range(transformer_layers)
             ]
@@ -423,16 +427,18 @@ class _TrainLanguageModel(nn.Module):
 
 
 class _TransformerDecoderBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, moe_expert_count: int) -> None:
+    def __init__(self, d_model: int, n_heads: int, moe_expert_count: int, dropout: float) -> None:
         super().__init__()
         self.attn_norm = nn.LayerNorm(d_model)
         self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, batch_first=True)
+        self.attn_dropout = nn.Dropout(dropout)
         self.ffn_norm = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model),
             nn.GELU(),
             nn.Linear(4 * d_model, d_model),
         )
+        self.ffn_dropout = nn.Dropout(dropout)
         self.moe_gate = nn.Linear(d_model, moe_expert_count) if moe_expert_count > 0 else None
         self.moe_experts = (
             nn.ModuleList([nn.Sequential(nn.Linear(d_model, d_model), nn.GELU()) for _ in range(moe_expert_count)])
@@ -443,7 +449,7 @@ class _TransformerDecoderBlock(nn.Module):
     def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
         attn_input = self.attn_norm(x)
         attn_out, _ = self.attn(attn_input, attn_input, attn_input, attn_mask=causal_mask, need_weights=False)
-        x = x + attn_out
+        x = x + self.attn_dropout(attn_out)
 
         ffn_input = self.ffn_norm(x)
         if self.moe_gate is not None and self.moe_experts:
@@ -452,7 +458,7 @@ class _TransformerDecoderBlock(nn.Module):
             ffn_out = torch.sum(expert_outputs * gate.unsqueeze(-1), dim=-2)
         else:
             ffn_out = self.ffn(ffn_input)
-        return x + ffn_out
+        return x + self.ffn_dropout(ffn_out)
 
 
 def _masked_token_cross_entropy(logits: torch.Tensor, target_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
