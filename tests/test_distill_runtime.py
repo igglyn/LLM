@@ -235,8 +235,8 @@ def _runtime_config_xml(glob_path: str, *, min_bytes: str = "4", max_entries: st
   </Dataset>
   <Model>
     <Defaults d_model="1024" n_heads="8" />
-    <Patcher name="p1" patch_size="128"><Train steps="10"><Optimizer type="adamw" lr="0.001" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Patcher>
-    <Trunk name="t1" context="1024"><Train steps="10"><Optimizer type="adamw" lr="0.001" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Trunk>
+    <Patcher name="p1" patch_size="128"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Patcher>
+    <Trunk name="t1" context="1024"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Trunk>
   </Model>
 </Config>
 """
@@ -267,8 +267,8 @@ def _mixture_config_xml() -> str:
   </Dataset>
   <Model>
     <Defaults d_model="1024" n_heads="8" />
-    <Patcher name="p1" patch_size="128"><Train steps="10"><Optimizer type="adamw" lr="0.001" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Patcher>
-    <Trunk name="t1" context="1024"><Train steps="10"><Optimizer type="adamw" lr="0.001" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Trunk>
+    <Patcher name="p1" patch_size="128"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Patcher>
+    <Trunk name="t1" context="1024"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Trunk>
   </Model>
 </Config>
 """

@@ -139,7 +139,6 @@ class SchedulerSpec:
 @dataclass(frozen=True)
 class OptimizerSpec:
     optimizer_type: str
-    lr: float
     weight_decay: float
     schedulers: List[SchedulerSpec] = field(default_factory=list)
 

@@ -76,6 +76,21 @@ def test_train_requires_scheduler_step_coverage(tmp_path: Path) -> None:
         parse_config(path)
 
 
+def test_optimizer_parses_without_lr_attribute(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    )
+    path = tmp_path / "optimizer_without_lr.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(path)
+    assert parsed.model.patchers[0].train.optimizer.weight_decay == 0.1
+    assert parsed.model.trunk.train.optimizer.weight_decay == 0.1
+
+
 def test_train_requires_scheduler_ranges(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',
@@ -199,12 +214,12 @@ def test_rope_drope_base_and_scale_defaults_and_overrides(tmp_path: Path) -> Non
   <Model>
     <Defaults d_model="1024" n_heads="8" />
     <Patcher name="p1" patch_size="128">
-      <Train steps="100"><Optimizer type="adamw" lr="0.001" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
+      <Train steps="100"><Optimizer type="adamw" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
       <RoPE base="32000" scale="0.8" />
       <Transformer />
     </Patcher>
     <Trunk name="t1" context="1024">
-      <Train steps="100"><Optimizer type="adamw" lr="0.0005" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
+      <Train steps="100"><Optimizer type="adamw" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
       <DRope />
       <Transformer />
     </Trunk>
@@ -237,7 +252,7 @@ def test_resolution_raises_when_transformer_unresolved() -> None:
                 PatcherSpec(
                     name="p",
                     patch_size=1,
-                    train=TrainSpec(steps=1, optimizer=OptimizerSpec(optimizer_type="adamw", lr=0.1, weight_decay=0.0)),
+                    train=TrainSpec(steps=1, optimizer=OptimizerSpec(optimizer_type="adamw", weight_decay=0.0)),
                     transformer_blocks=[TransformerBlockSpec()],
                     block_order=["Transformer"],
                 )
@@ -314,7 +329,7 @@ def _minimal_valid_xml(*, patcher_attrs: str, patcher_transformer: str, trunk_at
     <Defaults d_model="1024" n_heads="8" />
     <Patcher {patcher_attrs}>
       <Train steps="100">
-        <Optimizer type="adamw" lr="0.001" weight_decay="0.1">
+        <Optimizer type="adamw" weight_decay="0.1">
           <Scheduler type="cosine" start_step="0" end_step="100" />
         </Optimizer>
       </Train>
@@ -322,7 +337,7 @@ def _minimal_valid_xml(*, patcher_attrs: str, patcher_transformer: str, trunk_at
     </Patcher>
     <Trunk {trunk_attrs}>
       <Train steps="100">
-        <Optimizer type="adamw" lr="0.0005" weight_decay="0.1">
+        <Optimizer type="adamw" weight_decay="0.1">
           <Scheduler type="cosine" start_step="0" end_step="100" />
         </Optimizer>
       </Train>
