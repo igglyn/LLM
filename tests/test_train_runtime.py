@@ -6,7 +6,7 @@ from shared.config import parse_config, resolve_config
 from train.blocks import MixOfExpertsBlock
 from train.builder import build_model_runtime
 from train.metrics import summarize_model_runtime
-from train.runtime import _is_offset_step
+from train.runtime import _apply_loss_threshold_decay, _is_offset_step
 from train.specs import RuntimeSchedulerConfig
 
 
@@ -68,3 +68,35 @@ def test_offset_scheduler_marks_skip_range() -> None:
     assert _is_offset_step(schedulers, step=2) is True
     assert _is_offset_step(schedulers, step=4) is True
     assert _is_offset_step(schedulers, step=5) is False
+
+
+def test_loss_threshold_decay_is_one_shot_per_threshold() -> None:
+    thresholds = [
+        {
+            "start": 0,
+            "end": 10,
+            "threshold": 2.0,
+            "decay_factor": 0.5,
+            "monitor": "train_loss",
+            "triggered": False,
+        }
+    ]
+
+    lr_multiplier = 1.0
+    lr_multiplier = _apply_loss_threshold_decay(
+        step=0,
+        loss_value=1.0,
+        configured_thresholds=thresholds,
+        lr_multiplier=lr_multiplier,
+    )
+    assert lr_multiplier == 0.5
+
+    # Loss remains below threshold, but the one-shot trigger should not re-apply decay.
+    lr_multiplier = _apply_loss_threshold_decay(
+        step=1,
+        loss_value=0.8,
+        configured_thresholds=thresholds,
+        lr_multiplier=lr_multiplier,
+    )
+    assert lr_multiplier == 0.5
+

@@ -76,6 +76,8 @@ def train_model(
         weight_decay=model_runtime.trunk.train_config.weight_decay,
     )
     trunk_schedule_fn = _build_schedule_fn(model_runtime.trunk.train_config.schedulers, total_steps=steps)
+    trunk_loss_thresholds = _loss_threshold_schedulers(model_runtime.trunk.train_config.schedulers, total_steps=steps)
+    trunk_lr_multiplier = 1.0
 
     patcher_layer_count = _count_patcher_transformer_layers(model_runtime)
     patcher_train_config = model_runtime.patchers[0].train_config if model_runtime.patchers else model_runtime.trunk.train_config
@@ -96,6 +98,8 @@ def train_model(
         weight_decay=patcher_train_config.weight_decay,
     )
     patcher_schedule_fn = _build_schedule_fn(patcher_train_config.schedulers, total_steps=steps)
+    patcher_loss_thresholds = _loss_threshold_schedulers(patcher_train_config.schedulers, total_steps=steps)
+    patcher_lr_multiplier = 1.0
 
     start_step = 0
     if resume_from:
@@ -126,11 +130,13 @@ def train_model(
         trunk_input_ids, target_ids = _next_token_batch(trunk_batch_sequences, pad_id=token_to_id["<pad>"])
         patcher_input_ids, _ = _next_token_batch(patcher_batch_sequences, pad_id=token_to_id["<pad>"])
 
-        trunk_lr = trunk_schedule_fn(step)
+        scheduled_trunk_lr = trunk_schedule_fn(step)
+        trunk_lr = scheduled_trunk_lr * trunk_lr_multiplier
         for param_group in trunk_optimizer.param_groups:
             param_group["lr"] = trunk_lr
 
-        patcher_lr = patcher_schedule_fn(step)
+        scheduled_patcher_lr = patcher_schedule_fn(step)
+        patcher_lr = scheduled_patcher_lr * patcher_lr_multiplier
         for param_group in patcher_optimizer.param_groups:
             param_group["lr"] = patcher_lr
 
@@ -168,14 +174,36 @@ def train_model(
         detached_loss = float(loss.detach().cpu())
         detached_trunk_loss = float(next_token_loss.detach().cpu())
         detached_patcher_loss = float(patcher_loss.detach().cpu())
+
+        trunk_lr_multiplier = _apply_loss_threshold_decay(
+            step=step,
+            loss_value=detached_trunk_loss,
+            configured_thresholds=trunk_loss_thresholds,
+            lr_multiplier=trunk_lr_multiplier,
+        )
+        patcher_lr_multiplier = _apply_loss_threshold_decay(
+            step=step,
+            loss_value=detached_patcher_loss,
+            configured_thresholds=patcher_loss_thresholds,
+            lr_multiplier=patcher_lr_multiplier,
+        )
+
+        updated_trunk_lr = scheduled_trunk_lr * trunk_lr_multiplier
+        for param_group in trunk_optimizer.param_groups:
+            param_group["lr"] = updated_trunk_lr
+        updated_patcher_lr = scheduled_patcher_lr * patcher_lr_multiplier
+        for param_group in patcher_optimizer.param_groups:
+            param_group["lr"] = updated_patcher_lr
         losses.append(detached_loss)
         trunk_losses.append(detached_trunk_loss)
         patcher_losses.append(detached_patcher_loss)
 
         if log_every_steps > 0 and (step + 1) % log_every_steps == 0:
+            actual_trunk_lr = float(trunk_optimizer.param_groups[0]["lr"])
+            actual_patcher_lr = float(patcher_optimizer.param_groups[0]["lr"])
             print(
                 f"step={step + 1} loss={detached_loss:.6f} trunk_loss={detached_trunk_loss:.6f} "
-                f"patcher_loss={detached_patcher_loss:.6f} trunk_lr={trunk_lr:.8f} patcher_lr={patcher_lr:.8f}"
+                f"patcher_loss={detached_patcher_loss:.6f} trunk_lr={actual_trunk_lr:.8f} patcher_lr={actual_patcher_lr:.8f}"
             )
 
         if save_every > 0 and (step + 1) % save_every == 0:
@@ -262,6 +290,8 @@ def train_model(
         "initial_patcher_loss": initial_patcher_loss,
         "final_patcher_loss": final_patcher_loss,
         "weights_file": str(weights_file),
+        "final_trunk_lr": float(trunk_optimizer.param_groups[0]["lr"]),
+        "final_patcher_lr": float(patcher_optimizer.param_groups[0]["lr"]),
     }
 
 
@@ -480,11 +510,12 @@ def _build_optimizer(optimizer_type: str, parameters: Any, weight_decay: float) 
 
 
 def _build_schedule_fn(schedulers: list[RuntimeSchedulerConfig], total_steps: int) -> Callable[[int], float]:
-    if not schedulers:
+    active_schedulers = [scheduler for scheduler in schedulers if scheduler.scheduler_type != "loss_threshold"]
+    if not active_schedulers:
         return lambda _step: 3e-3
 
     intervals: list[tuple[int, int, str, dict[str, str]]] = []
-    for scheduler in schedulers:
+    for scheduler in active_schedulers:
         start = int(scheduler.attributes.get("start_step", "0"))
         end = int(scheduler.attributes.get("end_step", str(total_steps)))
         intervals.append((start, end, scheduler.scheduler_type, dict(scheduler.attributes)))
@@ -502,12 +533,47 @@ def _build_schedule_fn(schedulers: list[RuntimeSchedulerConfig], total_steps: in
                     span = max(1, end - start)
                     pct = (step - start) / span
                     return min_lr + 0.5 * (max_lr - min_lr) * (1 + torch.cos(torch.tensor(pct * 3.1415926535)).item())
-                if scheduler_type == "loss_threshold":
-                    return max(min_lr, max_lr * float(attrs.get("decay_factor", "1.0")))
                 return max_lr
         return 1e-5
 
     return _lr
+
+
+def _loss_threshold_schedulers(schedulers: list[RuntimeSchedulerConfig], total_steps: int) -> list[dict[str, Any]]:
+    configured: list[dict[str, Any]] = []
+    for scheduler in schedulers:
+        if scheduler.scheduler_type != "loss_threshold":
+            continue
+        attrs = dict(scheduler.attributes)
+        configured.append(
+            {
+                "start": int(attrs.get("start_step", "0")),
+                "end": int(attrs.get("end_step", str(total_steps))),
+                "threshold": float(attrs.get("threshold", "0.0")),
+                "decay_factor": float(attrs.get("decay_factor", "1.0")),
+                "monitor": str(attrs.get("monitor", "train_loss")),
+                "triggered": False,
+            }
+        )
+    return configured
+
+
+def _apply_loss_threshold_decay(
+    step: int,
+    loss_value: float,
+    configured_thresholds: list[dict[str, Any]],
+    lr_multiplier: float,
+) -> float:
+    updated_multiplier = lr_multiplier
+    for threshold in configured_thresholds:
+        if threshold["triggered"]:
+            continue
+        if not threshold["start"] <= step < threshold["end"]:
+            continue
+        if loss_value <= threshold["threshold"]:
+            updated_multiplier *= threshold["decay_factor"]
+            threshold["triggered"] = True
+    return updated_multiplier
 
 
 

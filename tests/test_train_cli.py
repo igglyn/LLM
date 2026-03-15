@@ -291,6 +291,44 @@ def test_build_log_every_prints_step_loss_and_lr(tmp_path: Path) -> None:
     assert 'trunk_loss=' in completed.stdout
     assert 'patcher_loss=' in completed.stdout
 
+
+
+def test_build_loss_threshold_decays_lr_and_reports_actual_value(tmp_path: Path) -> None:
+    config_path = _write_loss_threshold_config(tmp_path)
+    distill_dir = _write_distill_dir(tmp_path)
+    output_dir = tmp_path / 'model_loss_threshold'
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--distill-dir',
+            str(distill_dir),
+            '--output-dir',
+            str(output_dir),
+            '--max-steps',
+            '3',
+            '--log-every',
+            '1',
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    lines = [line for line in completed.stdout.splitlines() if line.startswith('step=')]
+    assert len(lines) == 3
+    assert 'trunk_lr=0.00150000' in lines[0]
+    assert 'patcher_lr=0.00150000' in lines[0]
+    assert 'trunk_lr=0.00150000' in lines[1]
+    assert 'patcher_lr=0.00150000' in lines[1]
+    assert 'trunk_lr=0.00150000' in lines[2]
+    assert 'patcher_lr=0.00150000' in lines[2]
+
 def _write_distill_dir(tmp_path: Path) -> Path:
     distill_dir = tmp_path / 'distill'
     distill_dir.mkdir(parents=True, exist_ok=True)
@@ -386,6 +424,44 @@ def _write_small_dim_config(tmp_path: Path, d_model: int, n_heads: int) -> Path:
     )
     return path
 
+
+
+
+def _write_loss_threshold_config(tmp_path: Path) -> Path:
+    path = tmp_path / 'loss_threshold.xml'
+    path.write_text(
+        """
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_local">
+        <Source name="local" type="local_text_glob" uri="/tmp/*.txt" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild><Group name="g" percentage="100"><DatasetRef name="set_local" /></Group></MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="t"><Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend></Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="8" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="64" n_heads="4" />
+    <Patcher name="p1" patch_size="64">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="warmup" start_step="0" end_step="10" min_lr="0.003" max_lr="0.003" /><Scheduler type="loss_threshold" start_step="0" end_step="10" threshold="999.0" decay_factor="0.5" /></Optimizer></Train>
+      <Transformer layers="1" />
+    </Patcher>
+    <Trunk name="t1" context="128">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="warmup" start_step="0" end_step="10" min_lr="0.003" max_lr="0.003" /><Scheduler type="loss_threshold" start_step="0" end_step="10" threshold="999.0" decay_factor="0.5" /></Optimizer></Train>
+      <Transformer layers="1" />
+    </Trunk>
+  </Model>
+</Config>
+        """.strip(),
+        encoding='utf-8',
+    )
+    return path
 
 def _write_cli_sized_config(tmp_path: Path) -> Path:
     path = tmp_path / 'cli_sized.xml'
