@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     extract = sub.add_parser("extract")
     extract.add_argument("--config", required=True)
-    extract.add_argument("--output", required=True)
+    extract.add_argument("--output-dir", required=True)
 
     mix = sub.add_parser("mix")
     mix.add_argument("--config", required=True)
@@ -48,8 +48,8 @@ def main() -> None:
         return
 
     if args.command == "extract":
-        count = run_extract(args.config, args.output)
-        print(f"extract completed: rows={count}, output={args.output}")
+        count = run_extract(args.config, args.output_dir)
+        print(f"extract completed: rows={count}, output_dir={args.output_dir}")
         return
 
     if args.command == "mix":
@@ -65,7 +65,7 @@ def main() -> None:
 
         with tempfile.TemporaryDirectory(prefix="distill-stage-a-") as tmp_dir:
             tmp_root = Path(tmp_dir)
-            extracted = tmp_root / "extracted.jsonl"
+            extracted = tmp_root / "extracted"
             mixed = tmp_root / "mixed.jsonl"
             run_extract(args.config, extracted)
             run_mix(args.config, extracted, mixed)

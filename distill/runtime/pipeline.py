@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 
 from shared.config import parse_config
@@ -11,16 +12,24 @@ from .stage_a_runtime import run_stage_a, validate_stage_a_mode
 from .types import ExtractedDocument, MixtureDocument
 
 
-def run_extract(config_path: str | Path, output_path: str | Path) -> int:
+def run_extract(config_path: str | Path, output_dir: str | Path) -> int:
     config = parse_config(config_path)
     docs = run_source_extraction(config)
-    write_jsonl(output_path, docs)
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    docs_by_dataset: dict[str, list[ExtractedDocument]] = defaultdict(list)
+    for doc in docs:
+        docs_by_dataset[doc.dataset_entry].append(doc)
+
+    for dataset_name, rows in docs_by_dataset.items():
+        write_jsonl(output_root / f"{dataset_name}.jsonl", rows)
     return len(docs)
 
 
 def run_mix(config_path: str | Path, extracted_path: str | Path, output_path: str | Path) -> int:
     config = parse_config(config_path)
-    extracted = [ExtractedDocument(**row) for row in read_jsonl(extracted_path)]
+    extracted = [ExtractedDocument(**row) for row in _read_extracted_rows(extracted_path)]
     mixed = run_mixture_build(config, extracted)
     write_jsonl(output_path, mixed)
     return len(mixed)
@@ -33,3 +42,13 @@ def run_stage_a_command(config_path: str | Path, mixed_path: str | Path, output_
     rows = run_stage_a(config, mixed)
     write_jsonl(output_path, rows)
     return len(rows)
+
+
+def _read_extracted_rows(extracted_path: str | Path) -> list[dict]:
+    source = Path(extracted_path)
+    if source.is_dir():
+        rows: list[dict] = []
+        for jsonl_path in sorted(source.glob("*.jsonl")):
+            rows.extend(read_jsonl(jsonl_path))
+        return rows
+    return read_jsonl(source)

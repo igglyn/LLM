@@ -13,11 +13,11 @@ def test_canonical_config_smoke_through_both_apps(tmp_path: Path) -> None:
     config_path = tmp_path / "smoke_config.xml"
     config_path.write_text(_smoke_config_xml(str(docs_dir / "*.txt")), encoding="utf-8")
 
-    extracted = tmp_path / "extracted.jsonl"
+    extracted = tmp_path / "extracted"
     mixed = tmp_path / "mixed.jsonl"
     stage_a = tmp_path / "stage_a.jsonl"
 
-    _run([sys.executable, "-m", "distill", "extract", "--config", str(config_path), "--output", str(extracted)])
+    _run([sys.executable, "-m", "distill", "extract", "--config", str(config_path), "--output-dir", str(extracted)])
     _run([sys.executable, "-m", "distill", "mix", "--config", str(config_path), "--input", str(extracted), "--output", str(mixed)])
     _run([sys.executable, "-m", "distill", "stage-a", "--config", str(config_path), "--input", str(mixed), "--output", str(stage_a)])
 

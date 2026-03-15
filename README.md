@@ -50,8 +50,8 @@ Boundary rule:
 
 ```bash
 # distill
-python -m distill extract --config examples/config.example.xml --output /tmp/extracted.jsonl
-python -m distill mix --config examples/config.example.xml --input /tmp/extracted.jsonl --output /tmp/mixed.jsonl
+python -m distill extract --config examples/config.example.xml --output-dir /tmp/extracted
+python -m distill mix --config examples/config.example.xml --input /tmp/extracted --output /tmp/mixed.jsonl
 python -m distill stage-a --config examples/config.example.xml --input /tmp/mixed.jsonl --output /tmp/stage_a.jsonl
 
 # train
@@ -75,8 +75,8 @@ Example commands:
 
 ```bash
 # distill with Hugging Face dataset + model backend
-python -m distill extract --config examples/config.hf.example.xml --output /tmp/hf_extracted.jsonl
-python -m distill mix --config examples/config.hf.example.xml --input /tmp/hf_extracted.jsonl --output /tmp/hf_mixed.jsonl
+python -m distill extract --config examples/config.hf.example.xml --output-dir /tmp/hf_extracted
+python -m distill mix --config examples/config.hf.example.xml --input /tmp/hf_extracted --output /tmp/hf_mixed.jsonl
 python -m distill stage-a --config examples/config.hf.example.xml --input /tmp/hf_mixed.jsonl --output /tmp/hf_stage_a.jsonl
 
 # train runtime bring-up on the same config
