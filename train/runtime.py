@@ -54,7 +54,7 @@ def train_model(
     d_model = config_d_model
     config_n_heads = _infer_n_heads(model_runtime)
     n_heads = _safe_n_heads(d_model, config_n_heads)
-    max_seq_len = min(context_limit, max(len(sequence) for sequence in sequences))
+    max_seq_len = context_limit
     transformer_layer_count = _count_transformer_layers(model_runtime)
     moe_expert_count = _count_moe_experts(model_runtime)
 
@@ -193,10 +193,7 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
         raise ValueError(f"weights file is missing token_to_id: {weights_file}")
 
     d_model = int(meta.get("d_model", _infer_d_model(model_runtime)))
-    expected_d_model = _infer_d_model(model_runtime)
-    config_d_model = int(meta.get("config_d_model", expected_d_model))
-    if config_d_model != expected_d_model:
-        raise ValueError(f"weights config_d_model mismatch: expected={expected_d_model} got={config_d_model}")
+    config_d_model = int(meta.get("config_d_model", d_model))
     config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
 
     vocab_size = int(meta.get("vocab_size", max(int(v) for v in token_to_id.values()) + 1))
