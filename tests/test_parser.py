@@ -91,6 +91,49 @@ def test_optimizer_parses_without_lr_attribute(tmp_path: Path) -> None:
     assert parsed.model.trunk.train.optimizer.weight_decay == 0.1
 
 
+
+def test_train_parses_batch_size_and_save_every(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace('<Train steps="100">', '<Train steps="100" batch_size="8" save_every="25">')
+    path = tmp_path / "train_batch_save.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(path)
+    assert parsed.model.patchers[0].train.batch_size == 8
+    assert parsed.model.patchers[0].train.save_every == 25
+
+
+def test_train_rejects_non_positive_batch_size(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace('<Train steps="100">', '<Train steps="100" batch_size="0">')
+    path = tmp_path / "train_bad_batch.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ConfigParseError, match="batch_size"):
+        parse_config(path)
+
+
+def test_train_rejects_negative_save_every(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace('<Train steps="100">', '<Train steps="100" save_every="-1">')
+    path = tmp_path / "train_bad_save_every.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ConfigParseError, match="save_every"):
+        parse_config(path)
+
 def test_train_requires_scheduler_ranges(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',
@@ -305,7 +348,7 @@ def test_resolution_raises_when_transformer_unresolved() -> None:
                 PatcherSpec(
                     name="p",
                     patch_size=1,
-                    train=TrainSpec(steps=1, optimizer=OptimizerSpec(optimizer_type="adamw", weight_decay=0.0)),
+                    train=TrainSpec(steps=1, batch_size=1, save_every=0, optimizer=OptimizerSpec(optimizer_type="adamw", weight_decay=0.0)),
                     transformer_blocks=[TransformerBlockSpec()],
                     block_order=["Transformer"],
                 )

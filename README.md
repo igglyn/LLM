@@ -55,8 +55,9 @@ python -m distill mix --config examples/config.example.xml --input /tmp/extracte
 python -m distill stage-a --config examples/config.example.xml --input /tmp/mixed.jsonl --output /tmp/stage_a
 
 # train
-python -m train build --config examples/config.example.xml --dataset-file /tmp/stage_a/stage_a.jsonl --output-dir /tmp/model --token-mapping-file /tmp/stage_a/token_mapping.jsonl
-python -m train package --config examples/config.example.xml --dataset-file /tmp/stage_a/stage_a.jsonl --output-dir /tmp/model_manifest
+python -m train build --config examples/config.example.xml --distill-dir /tmp/distill --output-dir /tmp/model
+# /tmp/distill should contain distill jsonl files (e.g. stage_a.jsonl) and optional token_mappings.json
+python -m train package --config examples/config.example.xml --dataset-file /tmp/stage_a.jsonl --output-dir /tmp/model_manifest
 python -m train run --config examples/config.example.xml --model-file /tmp/model/model.json --text "hello"
 python -m train summary --model-file /tmp/model/model.json
 python -m train smoke --config examples/config.example.xml
@@ -82,8 +83,9 @@ python -m distill mix --config examples/config.hf.example.xml --input /tmp/hf_ex
 python -m distill stage-a --config examples/config.hf.example.xml --input /tmp/hf_mixed.jsonl --output /tmp/hf_stage_a
 
 # train runtime bring-up on the same config
-python -m train build --config examples/config.hf.example.xml --dataset-file /tmp/hf_stage_a/stage_a.jsonl --output-dir /tmp/hf_model --token-mapping-file /tmp/hf_stage_a/token_mapping.jsonl
-python -m train package --config examples/config.hf.example.xml --dataset-file /tmp/hf_stage_a/stage_a.jsonl --output-dir /tmp/hf_model_manifest
+python -m train build --config examples/config.hf.example.xml --distill-dir /tmp/hf_distill --output-dir /tmp/hf_model
+# /tmp/hf_distill should contain distill jsonl files (e.g. stage_a.jsonl) and optional token_mappings.json
+python -m train package --config examples/config.hf.example.xml --dataset-file /tmp/hf_stage_a.jsonl --output-dir /tmp/hf_model_manifest
 python -m train run --config examples/config.hf.example.xml --model-file /tmp/hf_model/model.json --text "hello"
 python -m train summary --model-file /tmp/hf_model/model.json
 python -m train smoke --config examples/config.hf.example.xml

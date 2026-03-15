@@ -350,6 +350,13 @@ def _parse_moe(elem: ET.Element) -> MixOfExpertsSpec:
 def _parse_train(elem: ET.Element) -> TrainSpec:
     optimizer_elem = _required_child(elem, "Optimizer")
     train_steps = int(_required_attr(elem, "steps"))
+    batch_size = int(elem.attrib.get("batch_size", "1"))
+    save_every = int(elem.attrib.get("save_every", "0"))
+
+    if batch_size <= 0:
+        raise ConfigParseError("<Train> attribute 'batch_size' must be positive.")
+    if save_every < 0:
+        raise ConfigParseError("<Train> attribute 'save_every' must be >= 0.")
 
     schedulers = [
         SchedulerSpec(scheduler_type=_required_attr(scheduler_elem, "type"), attributes=dict(scheduler_elem.attrib))
@@ -362,7 +369,7 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
         weight_decay=float(_required_attr(optimizer_elem, "weight_decay")),
         schedulers=schedulers,
     )
-    return TrainSpec(steps=train_steps, optimizer=optimizer)
+    return TrainSpec(steps=train_steps, batch_size=batch_size, save_every=save_every, optimizer=optimizer)
 
 
 def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[SchedulerSpec]) -> None:

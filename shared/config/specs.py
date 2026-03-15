@@ -146,7 +146,9 @@ class OptimizerSpec:
 @dataclass(frozen=True)
 class TrainSpec:
     steps: int
-    optimizer: OptimizerSpec
+    batch_size: int = 1
+    save_every: int = 0
+    optimizer: OptimizerSpec = field(default_factory=lambda: OptimizerSpec(optimizer_type="adamw", weight_decay=0.0))
 
 
 @dataclass(frozen=True)

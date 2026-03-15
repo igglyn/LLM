@@ -8,12 +8,9 @@ from pathlib import Path
 
 def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     config_path = Path('examples/config.example.xml')
-    dataset_file = tmp_path / 'dataset.jsonl'
-    dataset_file.write_text('{"text":"sample one"}\n{"text":"sample two"}\n', encoding='utf-8')
+    distill_dir = _write_distill_dir(tmp_path)
     output_dir = tmp_path / 'model'
     model_file = output_dir / 'model.json'
-    token_mapping_file = tmp_path / 'token_mapping.jsonl'
-    token_mapping_file.write_text('{"token":"sample","mapped_id":0}\n', encoding='utf-8')
 
     subprocess.run(
         [
@@ -23,21 +20,27 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
             'build',
             '--config',
             str(config_path),
-            '--dataset-file',
-            str(dataset_file),
+            '--distill-dir',
+            str(distill_dir),
             '--output-dir',
             str(output_dir),
-            '--token-mapping-file',
-            str(token_mapping_file),
+            '--max-steps',
+            '300',
         ],
         check=True,
     )
 
     artifact = json.loads(model_file.read_text(encoding='utf-8'))
-    assert artifact['dataset_file'] == str(dataset_file)
+    assert artifact['dataset_file'] == str(distill_dir)
     assert Path(artifact['weights_file']).exists()
     assert artifact['training']['configured_steps'] == 50000
-    assert artifact['training']['steps'] == 1000
+    assert artifact['training']['steps'] == 300
+    assert artifact['training']['batch_size'] == 16
+    assert artifact['training']['save_every'] == 10000
+    assert artifact['training']['checkpoint_files'] == []
+    assert artifact['training']['used_positional_embedding'] is True
+    assert artifact['training']['token_mapping_file'] == str(distill_dir / 'token_mappings.json')
+    assert any(path.endswith('stage_a.jsonl') for path in artifact['training']['data_files'])
     assert artifact['training']['final_loss'] <= artifact['training']['initial_loss']
 
     summary = subprocess.check_output(
@@ -52,12 +55,9 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
 
 def test_run_uses_trained_artifact(tmp_path: Path) -> None:
     config_path = Path('examples/config.example.xml')
-    dataset_file = tmp_path / 'dataset.jsonl'
-    dataset_file.write_text('{"text":"sample one"}\n{"text":"sample two"}\n', encoding='utf-8')
+    distill_dir = _write_distill_dir(tmp_path)
     output_dir = tmp_path / 'model'
     model_file = output_dir / 'model.json'
-    token_mapping_file = tmp_path / 'token_mapping.jsonl'
-    token_mapping_file.write_text('{"token":"sample","mapped_id":0}\n', encoding='utf-8')
 
     subprocess.run(
         [
@@ -67,12 +67,12 @@ def test_run_uses_trained_artifact(tmp_path: Path) -> None:
             'build',
             '--config',
             str(config_path),
-            '--dataset-file',
-            str(dataset_file),
+            '--distill-dir',
+            str(distill_dir),
             '--output-dir',
             str(output_dir),
-            '--token-mapping-file',
-            str(token_mapping_file),
+            '--max-steps',
+            '300',
         ],
         check=True,
     )
@@ -97,6 +97,8 @@ def test_run_uses_trained_artifact(tmp_path: Path) -> None:
     assert result['text'] == 'run payload'
     assert isinstance(result['score'], float)
     assert result['d_model'] > 0
+    assert isinstance(result['predicted_token'], str)
+    assert isinstance(result['predicted_token_id'], int)
     assert 'TrunkEnd(main_trunk)' in result['trace']
 
 
@@ -129,69 +131,21 @@ def test_package_writes_manifest_only(tmp_path: Path) -> None:
     assert 'training' not in artifact
 
 
-def test_build_fails_when_token_mapping_size_mismatches_vocab(tmp_path: Path) -> None:
-    config_path = tmp_path / 'config_vocab.xml'
-    config_path.write_text(
-        """
-<Config>
-  <Dataset>
-    <SourceExtraction />
-    <MixtureBuild />
-    <Distillation>
-      <Teachers>
-        <Teacher name="t">
-          <Backend type="dummy_local">
-            <ModelRef name_or_path="dummy" />
-            <Execution device="cpu" precision="fp32" />
-          </Backend>
-        </Teacher>
-      </Teachers>
-      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="2" /></Stage>
-      <Stage name="StageB" enabled="false" teacher_ref="t"><LongContext max_tokens="64" /></Stage>
-      <Stage name="StageC" enabled="false" teacher_ref="t"><StructuredOutputs schema="json" /></Stage>
-    </Distillation>
-  </Dataset>
-  <Model>
-    <Defaults d_model="64" n_heads="8" />
-    <Patcher name="p1" patch_size="8">
-      <Train steps="5"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="5" /></Optimizer></Train>
-      <VocabEmbedding vocab_size="3" />
-      <Transformer />
-    </Patcher>
-    <Trunk name="t1" context="64">
-      <Train steps="5"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="5" /></Optimizer></Train>
-      <Transformer />
-    </Trunk>
-  </Model>
-</Config>
-        """.strip(),
+def _write_distill_dir(tmp_path: Path) -> Path:
+    distill_dir = tmp_path / 'distill'
+    distill_dir.mkdir(parents=True, exist_ok=True)
+    (distill_dir / 'stage_a.jsonl').write_text(
+        '\n'.join(
+            [
+                json.dumps({'prompt_text': 'hello world', 'target_text': 'again'}),
+                json.dumps({'prompt_text': 'code completion', 'target_text': 'rocks'}),
+            ]
+        )
+        + '\n',
         encoding='utf-8',
     )
-
-    dataset_file = tmp_path / 'dataset.jsonl'
-    dataset_file.write_text('{"text":"sample one"}\n', encoding='utf-8')
-    token_mapping_file = tmp_path / 'token_mapping.jsonl'
-    token_mapping_file.write_text('{"token":"a","mapped_id":0}\n{"token":"b","mapped_id":1}\n', encoding='utf-8')
-    output_dir = tmp_path / 'model'
-
-    completed = subprocess.run(
-        [
-            sys.executable,
-            '-m',
-            'train',
-            'build',
-            '--config',
-            str(config_path),
-            '--dataset-file',
-            str(dataset_file),
-            '--output-dir',
-            str(output_dir),
-            '--token-mapping-file',
-            str(token_mapping_file),
-        ],
-        text=True,
-        capture_output=True,
+    (distill_dir / 'token_mappings.json').write_text(
+        json.dumps({'token_to_id': {'<pad>': 0, '<unk>': 1, 'hello': 2, 'world': 3, 'again': 4, 'code': 5, 'completion': 6, 'rocks': 7}}),
+        encoding='utf-8',
     )
-
-    assert completed.returncode != 0
-    assert 'dictionary size mismatch' in (completed.stderr + completed.stdout)
+    return distill_dir

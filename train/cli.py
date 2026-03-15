@@ -13,9 +13,10 @@ def main() -> None:
 
     build_parser = subparsers.add_parser('build')
     build_parser.add_argument('--config', required=True, help='Path to XML config')
-    build_parser.add_argument('--dataset-file', required=True, help='Path to prepared dataset file')
+    build_parser.add_argument('--distill-dir', required=True, help='Directory containing distill JSONL data and token mappings')
     build_parser.add_argument('--output-dir', required=True, help='Directory where trained model artifacts are written')
-    build_parser.add_argument('--token-mapping-file', required=True, help='Path to StageA token_mapping.jsonl file')
+    build_parser.add_argument('--max-steps', type=int, default=None, help='Optional cap on training steps (defaults to config steps)')
+    build_parser.add_argument('--resume-from', default=None, help='Optional checkpoint file to resume build training from')
 
     package_parser = subparsers.add_parser('package')
     package_parser.add_argument('--config', required=True, help='Path to XML config')
@@ -38,21 +39,26 @@ def main() -> None:
 
     if args.command == 'build':
         model_runtime = load_model_runtime(args.config)
-        training = train_model(
-            model_runtime=model_runtime,
-            dataset_file=args.dataset_file,
-            output_dir=args.output_dir,
-            token_mapping_file=args.token_mapping_file,
-        )
+        training = train_model(model_runtime=model_runtime, distill_dir=args.distill_dir, output_dir=args.output_dir, max_steps=args.max_steps, resume_from=args.resume_from)
         model_file = write_training_artifact(
             model_runtime=model_runtime,
-            dataset_file=args.dataset_file,
+            dataset_file=args.distill_dir,
             output_dir=args.output_dir,
             weights_file=training['weights_file'],
             training={
                 'configured_steps': training['configured_steps'],
                 'steps': training['steps'],
+                'start_step': training['start_step'],
+                'batch_size': training['configured_batch_size'],
+                'save_every': training['save_every'],
+                'checkpoint_files': training['checkpoint_files'],
+                'optimizer_type': training['optimizer_type'],
+                'transformer_layers': training['transformer_layers'],
+                'moe_expert_count': training['moe_expert_count'],
                 'dataset_examples': training['dataset_examples'],
+                'data_files': training['data_files'],
+                'token_mapping_file': training['token_mapping_file'],
+                'used_positional_embedding': training['used_positional_embedding'],
                 'initial_loss': training['initial_loss'],
                 'final_loss': training['final_loss'],
             },
