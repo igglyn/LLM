@@ -33,6 +33,8 @@ def train_model(
     resume_from: str | None = None,
     log_every_steps: int = 0,
 ) -> dict[str, Any]:
+    _validate_trunk_blocks(model_runtime)
+
     distill_root = Path(distill_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -59,11 +61,8 @@ def train_model(
     transformer_layer_count = _count_transformer_layers(model_runtime)
     moe_expert_count = _count_moe_experts(model_runtime)
 
-    trunk_model = _TrainLanguageModel(
-        vocab_size=vocab_size,
+    trunk_model = _TrainTrunkModel(
         d_model=d_model,
-        max_seq_len=max_seq_len,
-        use_vocab_embedding=has_vocab_embedding,
         use_positional_embedding=has_pos_embedding,
         transformer_layers=transformer_layer_count,
         n_heads=n_heads,
@@ -79,9 +78,9 @@ def train_model(
 
     patcher_layer_count = _count_patcher_transformer_layers(model_runtime)
     patcher_train_config = model_runtime.patchers[0].train_config if model_runtime.patchers else model_runtime.trunk.train_config
-    patcher_model = _TrainLanguageModel(
-        vocab_size=vocab_size,
+    patcher_model = _TrainPatcherModel(
         d_model=d_model,
+        vocab_size=vocab_size,
         max_seq_len=max_seq_len,
         use_vocab_embedding=has_vocab_embedding,
         use_positional_embedding=has_pos_embedding,
@@ -123,7 +122,7 @@ def train_model(
             sequences[(step * patcher_batch_size + batch_index) % len(sequences)]
             for batch_index in range(patcher_batch_size)
         ]
-        trunk_input_ids, target_ids = _next_token_batch(trunk_batch_sequences, pad_id=token_to_id["<pad>"])
+        trunk_input_ids, _ = _next_token_batch(trunk_batch_sequences, pad_id=token_to_id["<pad>"])
         patcher_input_ids, _ = _next_token_batch(patcher_batch_sequences, pad_id=token_to_id["<pad>"])
 
         trunk_lr = trunk_schedule_fn(step)
@@ -153,24 +152,30 @@ def train_model(
             patcher_optimizer.step()
 
         if trunk_skip_step:
-            next_token_loss = torch.tensor(0.0)
+            next_patch_loss = torch.tensor(0.0)
         else:
-            next_token_logits = trunk_model(trunk_input_ids)
-            next_token_loss = _masked_token_cross_entropy(
-                logits=next_token_logits,
-                target_ids=target_ids,
-                pad_id=token_to_id["<pad>"],
-            )
             trunk_optimizer.zero_grad()
-            next_token_loss.backward()
-            if model_runtime.trunk.train_config.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(trunk_model.parameters(), model_runtime.trunk.train_config.grad_clip)
-            trunk_optimizer.step()
+            with torch.no_grad():
+                patcher_latents = patcher_model.encode_patch_latents(trunk_input_ids)
+            patch_input_latents, patch_target_latents = _next_patch_latent_batch(
+                patcher_latents=patcher_latents,
+                patch_size=max(1, model_runtime.patchers[0].patch_size) if model_runtime.patchers else 1,
+            )
+            if patch_input_latents.shape[1] == 0:
+                next_patch_loss = torch.tensor(0.0)
+            else:
+                predicted_patch_latents = trunk_model(patch_input_latents)
+                next_patch_loss = _masked_latent_mse(
+                    predicted_latents=predicted_patch_latents,
+                    target_latents=patch_target_latents,
+                )
+                next_patch_loss.backward()
+                trunk_optimizer.step()
 
-        loss = patcher_loss + next_token_loss
+        loss = patcher_loss + next_patch_loss
 
         detached_loss = float(loss.detach().cpu())
-        detached_trunk_loss = float(next_token_loss.detach().cpu())
+        detached_trunk_loss = float(next_patch_loss.detach().cpu())
         detached_patcher_loss = float(patcher_loss.detach().cpu())
         losses.append(detached_loss)
         trunk_losses.append(detached_trunk_loss)
@@ -228,9 +233,10 @@ def train_model(
                     {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
                     for scheduler in model_runtime.trunk.train_config.schedulers
                 ],
-                "prediction_target": "separate_patcher_and_trunk_objectives",
+                "prediction_target": "patch_latent_next_state_mse_plus_patcher_reconstruction",
                 "latent_dim": trunk_model.latent_dim,
-                "decoder_head": "token_logits_for_inference",
+                "decoder_head": "patcher_decoder_for_reconstruction_only",
+                "patch_size": max(1, model_runtime.patchers[0].patch_size) if model_runtime.patchers else 1,
             },
         },
         weights_file,
@@ -277,6 +283,8 @@ def run_trained_model(
     text: str,
     max_new_tokens: int = 1,
 ) -> dict[str, Any]:
+    _validate_trunk_blocks(model_runtime)
+
     payload = torch.load(weights_file, map_location="cpu")
     state_dict = payload.get("model_state")
     meta = payload.get("meta", {})
@@ -305,11 +313,8 @@ def run_trained_model(
             f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
         )
 
-    model = _TrainLanguageModel(
-        vocab_size=vocab_size,
+    model = _TrainTrunkModel(
         d_model=d_model,
-        max_seq_len=max_seq_len,
-        use_vocab_embedding=use_vocab_embedding,
         use_positional_embedding=use_positional_embedding,
         transformer_layers=transformer_layers,
         n_heads=n_heads,
@@ -319,16 +324,40 @@ def run_trained_model(
     model.load_state_dict(state_dict)
     model.eval()
 
+    patcher_state = payload.get("patcher_model_state")
+    if not isinstance(patcher_state, dict):
+        raise ValueError(f"weights file is missing patcher_model_state: {weights_file}")
+    patcher_model = _TrainPatcherModel(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        max_seq_len=max_seq_len,
+        use_vocab_embedding=use_vocab_embedding,
+        use_positional_embedding=use_positional_embedding,
+        transformer_layers=max(1, _count_patcher_transformer_layers(model_runtime)),
+        n_heads=n_heads,
+        moe_expert_count=0,
+        dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
+    )
+    patcher_model.load_state_dict(patcher_state)
+    patcher_model.eval()
+
     encoded = _encode_texts([text], {str(k): int(v) for k, v in token_to_id.items()}, max_tokens=max_seq_len)[0]
     pad_id = int(meta.get("pad_id", 0))
 
+    patch_size = int(meta.get("patch_size", 1))
     generated_ids: list[int] = []
     generated_scores: list[float] = []
     for _ in range(max(0, max_new_tokens)):
         window = encoded[-max_seq_len:]
         input_ids, _ = _next_token_batch([window], pad_id=pad_id)
+        patch_latents = patcher_model.encode_patch_latents(input_ids)
+        patch_sequence = _pool_patch_latents(patch_latents, patch_size)
+        if patch_sequence.shape[1] == 0:
+            break
+        patch_input = patch_sequence[:, -1:, :]
         with torch.no_grad():
-            logits = model(input_ids)
+            predicted_patch = model(patch_input)
+            logits = patcher_model.decode_latents(predicted_patch)
 
         next_token_logits = logits[0, -1]
         next_token_id = int(torch.argmax(next_token_logits).item())
@@ -358,11 +387,11 @@ def run_trained_model(
     }
 
 
-class _TrainLanguageModel(nn.Module):
+class _TrainPatcherModel(nn.Module):
     def __init__(
         self,
-        vocab_size: int,
         d_model: int,
+        vocab_size: int,
         max_seq_len: int,
         use_vocab_embedding: bool,
         use_positional_embedding: bool,
@@ -405,7 +434,7 @@ class _TrainLanguageModel(nn.Module):
             x = x + self.positional_embedding(positions)
         return x
 
-    def forward_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode_patch_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.forward_latents_from_encoded(self.encode_tokens(input_ids))
 
     def forward_latents_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
@@ -426,11 +455,46 @@ class _TrainLanguageModel(nn.Module):
     def reconstruct_logits_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
         return self.decode_latents(self.latent_head(encoded_inputs))
 
-    def forward_logits_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
-        return self.decode_latents(self.forward_latents_from_encoded(encoded_inputs))
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.forward_logits_from_encoded(self.encode_tokens(input_ids))
+class _TrainTrunkModel(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        use_positional_embedding: bool,
+        transformer_layers: int,
+        n_heads: int,
+        moe_expert_count: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.positional_embedding = nn.Embedding(4096, d_model) if use_positional_embedding else None
+        self.layers = nn.ModuleList(
+            [
+                _TransformerDecoderBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    moe_expert_count=moe_expert_count,
+                    dropout=dropout,
+                )
+                for _ in range(transformer_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(d_model)
+        self.latent_dim = d_model
+        self.latent_head = nn.Linear(d_model, self.latent_dim)
+
+    def forward(self, patch_latents: torch.Tensor) -> torch.Tensor:
+        x = patch_latents
+        if self.positional_embedding is not None:
+            positions = torch.arange(patch_latents.shape[1], device=patch_latents.device).unsqueeze(0)
+            x = x + self.positional_embedding(positions)
+
+        seq_len = x.shape[1]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
+        for layer in self.layers:
+            x = layer(x, causal_mask)
+        x = self.norm(x)
+        return self.latent_head(x)
 
 
 class _TransformerDecoderBlock(nn.Module):
@@ -475,6 +539,12 @@ def _masked_token_cross_entropy(logits: torch.Tensor, target_ids: torch.Tensor, 
         target_ids.reshape(-1),
         ignore_index=pad_id,
     )
+
+
+def _masked_latent_mse(predicted_latents: torch.Tensor, target_latents: torch.Tensor) -> torch.Tensor:
+    if predicted_latents.numel() == 0 or target_latents.numel() == 0:
+        return torch.tensor(0.0)
+    return torch.mean((predicted_latents - target_latents) ** 2)
 
 
 def _build_optimizer(optimizer_type: str, parameters: Any, weight_decay: float) -> torch.optim.Optimizer:
@@ -705,6 +775,30 @@ def _next_token_batch(sequences: list[list[int]], pad_id: int) -> tuple[torch.Te
     return input_ids, target_ids
 
 
+def _pool_patch_latents(patcher_latents: torch.Tensor, patch_size: int) -> torch.Tensor:
+    step = max(1, patch_size)
+    chunks: list[torch.Tensor] = []
+    for start in range(0, patcher_latents.shape[1], step):
+        chunk = patcher_latents[:, start : start + step, :]
+        chunks.append(chunk.mean(dim=1, keepdim=True))
+    if not chunks:
+        return torch.zeros((patcher_latents.shape[0], 0, patcher_latents.shape[2]), dtype=patcher_latents.dtype)
+    return torch.cat(chunks, dim=1)
+
+
+def _next_patch_latent_batch(patcher_latents: torch.Tensor, patch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    patch_sequence = _pool_patch_latents(patcher_latents, patch_size)
+    if patch_sequence.shape[1] < 2:
+        empty = patch_sequence[:, :0, :]
+        return empty, empty
+    return patch_sequence[:, :-1, :], patch_sequence[:, 1:, :]
+
+
+def _validate_trunk_blocks(model_runtime: ModelRuntime) -> None:
+    if any(block.block_name == "VocabEmbedding" for block in model_runtime.trunk.blocks):
+        raise ValueError("Trunk must not contain VocabEmbedding blocks for patch-latent training.")
+
+
 def _has_positional_embedding(model_runtime: ModelRuntime) -> bool:
     patcher_has_pos = any(block.block_name == "PosEmbedding" for patcher in model_runtime.patchers for block in patcher.blocks)
     trunk_has_pos = any(block.block_name == "PosEmbedding" for block in model_runtime.trunk.blocks)
@@ -713,8 +807,7 @@ def _has_positional_embedding(model_runtime: ModelRuntime) -> bool:
 
 def _has_vocab_embedding(model_runtime: ModelRuntime) -> bool:
     patcher_has_vocab = any(block.block_name == "VocabEmbedding" for patcher in model_runtime.patchers for block in patcher.blocks)
-    trunk_has_vocab = any(block.block_name == "VocabEmbedding" for block in model_runtime.trunk.blocks)
-    return patcher_has_vocab or trunk_has_vocab
+    return patcher_has_vocab
 
 
 def _infer_d_model(model_runtime: ModelRuntime) -> int:
@@ -757,61 +850,16 @@ def generate_tokens(
     text: str,
     max_new_tokens: int,
 ) -> dict[str, Any]:
-    payload = torch.load(weights_file, map_location="cpu")
-    state_dict = payload.get("model_state")
-    meta = payload.get("meta", {})
-    if not isinstance(state_dict, dict):
-        raise ValueError(f"weights file is missing model_state: {weights_file}")
-    if not isinstance(meta, dict):
-        raise ValueError(f"weights file is missing meta dictionary: {weights_file}")
-
-    token_to_id_raw = meta.get("token_to_id")
-    if not isinstance(token_to_id_raw, dict):
-        raise ValueError(f"weights file is missing token_to_id: {weights_file}")
-    token_to_id = {str(k): int(v) for k, v in token_to_id_raw.items()}
-    id_to_token = {int(v): str(k) for k, v in token_to_id.items()}
-
-    d_model = int(meta.get("d_model", _infer_d_model(model_runtime)))
-    config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
-    n_heads = int(meta.get("n_heads", config_n_heads))
-    if n_heads != config_n_heads:
-        raise ValueError(
-            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
-        )
-
-
-    model = _TrainLanguageModel(
-        vocab_size=int(meta.get("vocab_size", max(token_to_id.values()) + 1)),
-        d_model=d_model,
-        max_seq_len=int(meta.get("max_seq_len", 8)),
-        use_vocab_embedding=bool(meta.get("use_vocab_embedding", _has_vocab_embedding(model_runtime))),
-        use_positional_embedding=bool(meta.get("use_positional_embedding", _has_positional_embedding(model_runtime))),
-        transformer_layers=int(meta.get("transformer_layers", _count_transformer_layers(model_runtime))),
-        n_heads=n_heads,
-        moe_expert_count=int(meta.get("moe_expert_count", _count_moe_experts(model_runtime))),
-        dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
+    result = run_trained_model(
+        model_runtime=model_runtime,
+        weights_file=weights_file,
+        text=text,
+        max_new_tokens=max_new_tokens,
     )
-    model.load_state_dict(state_dict)
-    model.eval()
-
-    encoded = _encode_texts([text], token_to_id, max_tokens=int(meta.get("max_seq_len", 8)))[0]
-    max_seq_len = int(meta.get("max_seq_len", 8))
-    pad_id = int(meta.get("pad_id", token_to_id.get("<pad>", 0)))
-
-    for _ in range(max(0, max_new_tokens)):
-        window = encoded[-max_seq_len:]
-        input_ids, _ = _next_token_batch([window], pad_id=pad_id)
-        with torch.no_grad():
-            logits = model(input_ids)
-        next_id = int(torch.argmax(logits[0, -1]).item())
-        encoded.append(next_id)
-
-    generated_ids = encoded[-max(0, max_new_tokens):] if max_new_tokens > 0 else []
-    generated_tokens = [id_to_token.get(token_id, "<unk>") for token_id in generated_ids]
     return {
         "text": text,
-        "generated_tokens": generated_tokens,
-        "generated_token_ids": generated_ids,
+        "generated_tokens": result["predicted_tokens"],
+        "generated_token_ids": result["predicted_token_ids"],
         "max_new_tokens": max_new_tokens,
     }
 
