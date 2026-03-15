@@ -103,14 +103,15 @@ def test_run_uses_trained_artifact(tmp_path: Path) -> None:
     result = json.loads(output)
 
     assert result['text'] == 'run payload'
-    assert isinstance(result['score'], float)
     assert result['d_model'] > 0
-    assert isinstance(result['predicted_token'], str)
-    assert isinstance(result['predicted_token_id'], int)
+    assert result['max_new_tokens'] == 3
+    assert len(result['predicted_tokens']) == 3
+    assert len(result['predicted_token_ids']) == 3
+    assert len(result['scores']) == 3
+    assert all(isinstance(token, str) for token in result['predicted_tokens'])
+    assert all(isinstance(token_id, int) for token_id in result['predicted_token_ids'])
+    assert all(isinstance(score, float) for score in result['scores'])
     assert 'TrunkEnd(main_trunk)' in result['trace']
-    assert result['generation']['max_new_tokens'] == 3
-    assert len(result['generation']['generated_tokens']) == 3
-    assert len(result['generation']['generated_token_ids']) == 3
 
 
 def test_build_with_vocab_and_pos_embedding_sets_both_flags(tmp_path: Path) -> None:

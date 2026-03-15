@@ -4,7 +4,7 @@ import argparse
 import json
 
 from train.artifacts import read_model_artifact, write_build_artifact, write_training_artifact
-from train.runtime import generate_tokens, load_model_runtime, run_smoke, run_trained_model, train_model
+from train.runtime import load_model_runtime, run_smoke, run_trained_model, train_model
 
 
 def main() -> None:
@@ -104,8 +104,7 @@ def main() -> None:
         weights_file = model_artifact.get('weights_file')
         if not isinstance(weights_file, str):
             raise ValueError('model artifact does not contain a weights_file. Use `train build` output.')
-        result = run_trained_model(model_runtime=model_runtime, weights_file=weights_file, text=args.text)
-        result['generation'] = generate_tokens(
+        result = run_trained_model(
             model_runtime=model_runtime,
             weights_file=weights_file,
             text=args.text,

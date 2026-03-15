@@ -68,7 +68,7 @@ python -m distill stage-a --config examples/config.example.xml --input /tmp/mixe
 python -m train build --config examples/config.example.xml --distill-dir /tmp/distill --output-dir /tmp/model
 # /tmp/distill should contain distill jsonl files (e.g. stage_a.jsonl) and optional token_mappings.json
 python -m train package --config examples/config.example.xml --dataset-file /tmp/stage_a.jsonl --output-dir /tmp/model_manifest
-python -m train run --config examples/config.example.xml --model-file /tmp/model/model.json --text "hello"
+python -m train run --config examples/config.example.xml --model-file /tmp/model/model.json --text "hello" --max-new-tokens 8
 python -m train summary --model-file /tmp/model/model.json
 python -m train smoke --config examples/config.example.xml
 
@@ -96,7 +96,7 @@ python -m distill stage-a --config examples/config.hf.example.xml --input /tmp/h
 python -m train build --config examples/config.hf.example.xml --distill-dir /tmp/hf_distill --output-dir /tmp/hf_model
 # /tmp/hf_distill should contain distill jsonl files (e.g. stage_a.jsonl) and optional token_mappings.json
 python -m train package --config examples/config.hf.example.xml --dataset-file /tmp/hf_stage_a.jsonl --output-dir /tmp/hf_model_manifest
-python -m train run --config examples/config.hf.example.xml --model-file /tmp/hf_model/model.json --text "hello"
+python -m train run --config examples/config.hf.example.xml --model-file /tmp/hf_model/model.json --text "hello" --max-new-tokens 8
 python -m train summary --model-file /tmp/hf_model/model.json
 python -m train smoke --config examples/config.hf.example.xml
 ```
