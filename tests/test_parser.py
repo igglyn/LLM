@@ -173,8 +173,8 @@ def test_cosine_scheduler_rejects_t_max(tmp_path: Path) -> None:
 def test_patcher_child_block_order_preserves_order() -> None:
     config = parse_config(EXAMPLE_CONFIG_PATH)
 
-    assert config.model.patchers[0].block_order == ["RoPE", "Transformer", "PosEmbedding"]
-    assert config.model.patchers[1].block_order == ["PosEmbedding", "RoPE", "Transformer"]
+    assert config.model.patchers[0].block_order == ["RoPE", "Transformer", "PosEmbedding", "LayerNorm"]
+    assert config.model.patchers[1].block_order == ["PosEmbedding", "RoPE", "Transformer", "LayerNorm"]
 
 
 

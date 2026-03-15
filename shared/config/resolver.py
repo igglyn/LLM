@@ -71,6 +71,7 @@ def _resolve_patcher(raw_patcher: PatcherSpec, model_defaults: DefaultsSpec) -> 
         rope_blocks=resolved_ropes,
         pos_embedding_blocks=raw_patcher.pos_embedding_blocks,
         vocab_embedding_blocks=raw_patcher.vocab_embedding_blocks,
+        layer_norm_blocks=raw_patcher.layer_norm_blocks,
         transformer_blocks=resolved_transformers,
         block_order=list(raw_patcher.block_order),
     )
