@@ -45,6 +45,7 @@ def train_model(
     save_every = model_runtime.trunk.train_config.save_every
     optimizer_type = model_runtime.trunk.train_config.optimizer_type
     has_pos_embedding = _has_positional_embedding(model_runtime)
+    has_vocab_embedding = _has_vocab_embedding(model_runtime)
 
     context_limit = max(2, model_runtime.trunk.context)
     sequences = _encode_texts(texts, token_to_id, max_tokens=context_limit)
@@ -61,6 +62,7 @@ def train_model(
         vocab_size=vocab_size,
         d_model=d_model,
         max_seq_len=max_seq_len,
+        use_vocab_embedding=has_vocab_embedding,
         use_positional_embedding=has_pos_embedding,
         transformer_layers=transformer_layer_count,
         n_heads=n_heads,
@@ -132,6 +134,7 @@ def train_model(
                 "n_heads": n_heads,
                 "max_seq_len": max_seq_len,
                 "context_limit": context_limit,
+                "use_vocab_embedding": has_vocab_embedding,
                 "use_positional_embedding": has_pos_embedding,
                 "transformer_layers": transformer_layer_count,
                 "moe_expert_count": moe_expert_count,
@@ -164,6 +167,7 @@ def train_model(
         "dataset_examples": len(texts),
         "data_files": data_files,
         "token_mapping_file": token_mapping_file,
+        "used_vocab_embedding": has_vocab_embedding,
         "used_positional_embedding": has_pos_embedding,
         "transformer_layers": transformer_layer_count,
         "moe_expert_count": moe_expert_count,
@@ -197,15 +201,21 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
 
     vocab_size = int(meta.get("vocab_size", max(int(v) for v in token_to_id.values()) + 1))
     max_seq_len = int(meta.get("max_seq_len", 8))
+    use_vocab_embedding = bool(meta.get("use_vocab_embedding", _has_vocab_embedding(model_runtime)))
     use_positional_embedding = bool(meta.get("use_positional_embedding", _has_positional_embedding(model_runtime)))
     transformer_layers = int(meta.get("transformer_layers", _count_transformer_layers(model_runtime)))
     moe_expert_count = int(meta.get("moe_expert_count", _count_moe_experts(model_runtime)))
     n_heads = _safe_n_heads(d_model, int(meta.get("n_heads", config_n_heads)))
+    if n_heads != config_n_heads:
+        raise ValueError(
+            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
+        )
 
     model = _TrainLanguageModel(
         vocab_size=vocab_size,
         d_model=d_model,
         max_seq_len=max_seq_len,
+        use_vocab_embedding=use_vocab_embedding,
         use_positional_embedding=use_positional_embedding,
         transformer_layers=transformer_layers,
         n_heads=n_heads,
@@ -229,6 +239,7 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
         "predicted_token_id": next_token_id,
         "score": float(torch.max(logits[0, -1]).item()),
         "d_model": d_model,
+        "used_vocab_embedding": use_vocab_embedding,
         "transformer_layers": transformer_layers,
         "n_heads": n_heads,
         "moe_expert_count": moe_expert_count,
@@ -245,13 +256,15 @@ class _TrainLanguageModel(nn.Module):
         vocab_size: int,
         d_model: int,
         max_seq_len: int,
+        use_vocab_embedding: bool,
         use_positional_embedding: bool,
         transformer_layers: int,
         n_heads: int,
         moe_expert_count: int,
     ) -> None:
         super().__init__()
-        self.vocab_embedding = nn.Embedding(vocab_size, d_model)
+        self.vocab_embedding = nn.Embedding(vocab_size, d_model) if use_vocab_embedding else None
+        self.token_projection = nn.Linear(1, d_model) if not use_vocab_embedding else None
         self.positional_embedding = nn.Embedding(max_seq_len, d_model) if use_positional_embedding else None
         self.layers = nn.ModuleList(
             [
@@ -267,7 +280,12 @@ class _TrainLanguageModel(nn.Module):
         self.head = nn.Linear(d_model, vocab_size)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        x = self.vocab_embedding(input_ids)
+        if self.vocab_embedding is not None:
+            x = self.vocab_embedding(input_ids)
+        elif self.token_projection is not None:
+            x = self.token_projection(input_ids.to(torch.float32).unsqueeze(-1))
+        else:
+            raise ValueError("model is missing both vocab_embedding and token_projection")
         if self.positional_embedding is not None:
             positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
             x = x + self.positional_embedding(positions)
@@ -517,6 +535,12 @@ def _has_positional_embedding(model_runtime: ModelRuntime) -> bool:
     return patcher_has_pos or trunk_has_pos
 
 
+def _has_vocab_embedding(model_runtime: ModelRuntime) -> bool:
+    patcher_has_vocab = any(block.block_name == "VocabEmbedding" for patcher in model_runtime.patchers for block in patcher.blocks)
+    trunk_has_vocab = any(block.block_name == "VocabEmbedding" for block in model_runtime.trunk.blocks)
+    return patcher_has_vocab or trunk_has_vocab
+
+
 def _infer_d_model(model_runtime: ModelRuntime) -> int:
     for patcher in model_runtime.patchers:
         for block in patcher.blocks:
@@ -550,6 +574,69 @@ def _safe_n_heads(d_model: int, configured_heads: int) -> int:
     return max(1, candidate)
 
 
+def generate_tokens(
+    model_runtime: ModelRuntime,
+    weights_file: str,
+    text: str,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    payload = torch.load(weights_file, map_location="cpu")
+    state_dict = payload.get("model_state")
+    meta = payload.get("meta", {})
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"weights file is missing model_state: {weights_file}")
+    if not isinstance(meta, dict):
+        raise ValueError(f"weights file is missing meta dictionary: {weights_file}")
+
+    token_to_id_raw = meta.get("token_to_id")
+    if not isinstance(token_to_id_raw, dict):
+        raise ValueError(f"weights file is missing token_to_id: {weights_file}")
+    token_to_id = {str(k): int(v) for k, v in token_to_id_raw.items()}
+    id_to_token = {int(v): str(k) for k, v in token_to_id.items()}
+
+    d_model = int(meta.get("d_model", _infer_d_model(model_runtime)))
+    config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
+    n_heads = _safe_n_heads(d_model, int(meta.get("n_heads", config_n_heads)))
+    if n_heads != config_n_heads:
+        raise ValueError(
+            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
+        )
+
+    model = _TrainLanguageModel(
+        vocab_size=int(meta.get("vocab_size", max(token_to_id.values()) + 1)),
+        d_model=d_model,
+        max_seq_len=int(meta.get("max_seq_len", 8)),
+        use_vocab_embedding=bool(meta.get("use_vocab_embedding", _has_vocab_embedding(model_runtime))),
+        use_positional_embedding=bool(meta.get("use_positional_embedding", _has_positional_embedding(model_runtime))),
+        transformer_layers=int(meta.get("transformer_layers", _count_transformer_layers(model_runtime))),
+        n_heads=n_heads,
+        moe_expert_count=int(meta.get("moe_expert_count", _count_moe_experts(model_runtime))),
+    )
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    encoded = _encode_texts([text], token_to_id, max_tokens=int(meta.get("max_seq_len", 8)))[0]
+    max_seq_len = int(meta.get("max_seq_len", 8))
+    pad_id = int(meta.get("pad_id", token_to_id.get("<pad>", 0)))
+
+    for _ in range(max(0, max_new_tokens)):
+        window = encoded[-max_seq_len:]
+        input_ids, _ = _next_token_batch([window], pad_id=pad_id)
+        with torch.no_grad():
+            logits = model(input_ids)
+        next_id = int(torch.argmax(logits[0, -1]).item())
+        encoded.append(next_id)
+
+    generated_ids = encoded[-max(0, max_new_tokens):] if max_new_tokens > 0 else []
+    generated_tokens = [id_to_token.get(token_id, "<unk>") for token_id in generated_ids]
+    return {
+        "text": text,
+        "generated_tokens": generated_tokens,
+        "generated_token_ids": generated_ids,
+        "max_new_tokens": max_new_tokens,
+    }
+
+
 __all__ = [
     "ModelRuntime",
     "RuntimeState",
@@ -559,4 +646,5 @@ __all__ = [
     "run_dummy_forward",
     "train_model",
     "run_trained_model",
+    "generate_tokens",
 ]

@@ -38,6 +38,7 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     assert artifact['training']['batch_size'] == 16
     assert artifact['training']['save_every'] == 10000
     assert artifact['training']['checkpoint_files'] == []
+    assert artifact['training']['used_vocab_embedding'] is False
     assert artifact['training']['used_positional_embedding'] is True
     assert artifact['training']['token_mapping_file'] == str(distill_dir / 'token_mappings.json')
     assert any(path.endswith('stage_a.jsonl') for path in artifact['training']['data_files'])
@@ -89,6 +90,8 @@ def test_run_uses_trained_artifact(tmp_path: Path) -> None:
             str(model_file),
             '--text',
             'run payload',
+            '--max-new-tokens',
+            '3',
         ],
         text=True,
     )
@@ -100,6 +103,38 @@ def test_run_uses_trained_artifact(tmp_path: Path) -> None:
     assert isinstance(result['predicted_token'], str)
     assert isinstance(result['predicted_token_id'], int)
     assert 'TrunkEnd(main_trunk)' in result['trace']
+    assert result['generation']['max_new_tokens'] == 3
+    assert len(result['generation']['generated_tokens']) == 3
+    assert len(result['generation']['generated_token_ids']) == 3
+
+
+def test_build_with_vocab_and_pos_embedding_sets_both_flags(tmp_path: Path) -> None:
+    config_path = _write_vocab_and_pos_config(tmp_path)
+    distill_dir = _write_distill_dir(tmp_path)
+    output_dir = tmp_path / 'model_both_embed'
+    model_file = output_dir / 'model.json'
+
+    subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--distill-dir',
+            str(distill_dir),
+            '--output-dir',
+            str(output_dir),
+            '--max-steps',
+            '5',
+        ],
+        check=True,
+    )
+
+    artifact = json.loads(model_file.read_text(encoding='utf-8'))
+    assert artifact['training']['used_vocab_embedding'] is True
+    assert artifact['training']['used_positional_embedding'] is True
 
 
 def test_package_writes_manifest_only(tmp_path: Path) -> None:
@@ -200,3 +235,42 @@ def _write_distill_dir(tmp_path: Path) -> Path:
         encoding='utf-8',
     )
     return distill_dir
+
+
+def _write_vocab_and_pos_config(tmp_path: Path) -> Path:
+    path = tmp_path / 'vocab_pos.xml'
+    path.write_text(
+        """
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_local">
+        <Source name="local" type="local_text_glob" uri="/tmp/*.txt" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild><Group name="g" percentage="100"><DatasetRef name="set_local" /></Group></MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="t"><Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend></Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="8" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="128" n_heads="8" />
+    <Patcher name="p1" patch_size="64">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <VocabEmbedding vocab_size="32000" />
+      <PosEmbedding type="learned" />
+      <Transformer layers="1" />
+    </Patcher>
+    <Trunk name="t1" context="128">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <Transformer layers="1" />
+    </Trunk>
+  </Model>
+</Config>
+        """.strip(),
+        encoding='utf-8',
+    )
+    return path
