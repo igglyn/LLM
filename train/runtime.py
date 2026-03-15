@@ -203,6 +203,10 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
     transformer_layers = int(meta.get("transformer_layers", _count_transformer_layers(model_runtime)))
     moe_expert_count = int(meta.get("moe_expert_count", _count_moe_experts(model_runtime)))
     n_heads = int(meta.get("n_heads", config_n_heads))
+    if n_heads != config_n_heads:
+        raise ValueError(
+            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
+        )
 
     model = _TrainLanguageModel(
         vocab_size=vocab_size,
@@ -591,6 +595,11 @@ def generate_tokens(
     d_model = int(meta.get("d_model", _infer_d_model(model_runtime)))
     config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
     n_heads = int(meta.get("n_heads", config_n_heads))
+    if n_heads != config_n_heads:
+        raise ValueError(
+            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
+        )
+
 
     model = _TrainLanguageModel(
         vocab_size=int(meta.get("vocab_size", max(token_to_id.values()) + 1)),
