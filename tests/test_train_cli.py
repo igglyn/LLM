@@ -143,6 +143,35 @@ def test_build_with_vocab_and_pos_embedding_sets_both_flags(tmp_path: Path) -> N
     assert artifact['training']['used_positional_embedding'] is True
 
 
+def test_build_rejects_trunk_vocab_embedding(tmp_path: Path) -> None:
+    config_path = _write_invalid_trunk_vocab_config(tmp_path)
+    distill_dir = _write_distill_dir(tmp_path)
+    output_dir = tmp_path / 'model_invalid_trunk_vocab'
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--distill-dir',
+            str(distill_dir),
+            '--output-dir',
+            str(output_dir),
+            '--max-steps',
+            '5',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert 'Trunk must not contain VocabEmbedding blocks' in completed.stderr
+
+
 def test_build_preserves_small_configured_d_model_and_n_heads(tmp_path: Path) -> None:
     config_path = _write_small_dim_config(tmp_path, d_model=384, n_heads=6)
     distill_dir = _write_distill_dir(tmp_path)
@@ -172,9 +201,9 @@ def test_build_preserves_small_configured_d_model_and_n_heads(tmp_path: Path) ->
     meta = payload['meta']
 
     assert (meta['d_model'], meta['n_heads']) == (384, 6)
-    assert meta['prediction_target'] == 'input_reconstruction_plus_next_token'
+    assert meta['prediction_target'] == 'patch_latent_next_state_mse_plus_patcher_reconstruction'
     assert meta['latent_dim'] == 384
-    assert meta['decoder_head'] == 'token_logits_for_inference'
+    assert meta['decoder_head'] == 'patcher_decoder_for_reconstruction_only'
 
 
 def test_package_writes_manifest_only(tmp_path: Path) -> None:
@@ -377,6 +406,45 @@ def _write_small_dim_config(tmp_path: Path, d_model: int, n_heads: int) -> Path:
     </Patcher>
     <Trunk name="t1" context="128">
       <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <Transformer layers="1" />
+    </Trunk>
+  </Model>
+</Config>
+        """.strip(),
+        encoding='utf-8',
+    )
+    return path
+
+
+def _write_invalid_trunk_vocab_config(tmp_path: Path) -> Path:
+    path = tmp_path / 'invalid_trunk_vocab.xml'
+    path.write_text(
+        """
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_local">
+        <Source name="local" type="local_text_glob" uri="/tmp/*.txt" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild><Group name="g" percentage="100"><DatasetRef name="set_local" /></Group></MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="t"><Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend></Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="8" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="128" n_heads="8" />
+    <Patcher name="p1" patch_size="64">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <VocabEmbedding vocab_size="32000" />
+      <Transformer layers="1" />
+    </Patcher>
+    <Trunk name="t1" context="128">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <VocabEmbedding vocab_size="32000" />
       <Transformer layers="1" />
     </Trunk>
   </Model>
