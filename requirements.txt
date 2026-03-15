@@ -1,0 +1,8 @@
+# Core development/test dependency
+pytest>=7.0
+
+# Optional runtime dependencies for Hugging Face examples
+# (used when running HF dataset extraction or HF teacher backends)
+datasets>=2.0
+transformers>=4.0
+torch>=2.0
