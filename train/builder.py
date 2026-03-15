@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from shared.config.specs import ResolvedConfigSpec, ResolvedMixOfExpertsSpec, ResolvedPatcherSpec, ResolvedTrunkSpec
-from train.blocks import DRopeBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEBlock, TransformerBlock, VocabEmbeddingBlock
+from train.blocks import (
+    DRopeBlock,
+    LayerNormBlock,
+    MixOfExpertsBlock,
+    PosEmbeddingBlock,
+    RoPEBlock,
+    TransformerBlock,
+    VocabEmbeddingBlock,
+)
 from train.optim import runtime_train_config_from_spec
 from train.specs import ExpertRuntime, ModelRuntime, PatcherRuntime, RuntimeBlock, TrunkRuntime
 
@@ -37,6 +45,19 @@ def _build_patcher_runtime(patcher: ResolvedPatcherSpec) -> PatcherRuntime:
     )
 
 
+def _layer_norm_eps(attributes: dict[str, str], context: str) -> float:
+    raw_eps = attributes.get("eps")
+    if raw_eps is None:
+        return 1e-5
+    try:
+        eps = float(raw_eps)
+    except ValueError as exc:
+        raise ValueError(f"{context} has invalid LayerNorm eps='{raw_eps}'.") from exc
+    if eps <= 0:
+        raise ValueError(f"{context} must declare LayerNorm eps > 0 (got {eps}).")
+    return eps
+
+
 def _build_trunk_runtime(trunk: ResolvedTrunkSpec) -> TrunkRuntime:
     return TrunkRuntime(
         name=trunk.name,
@@ -47,7 +68,7 @@ def _build_trunk_runtime(trunk: ResolvedTrunkSpec) -> TrunkRuntime:
 
 
 def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
-    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "Transformer": 0}
+    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "LayerNorm": 0, "Transformer": 0}
     blocks: list[RuntimeBlock] = []
 
     for block_name in patcher.block_order:
@@ -63,6 +84,10 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
             block = patcher.vocab_embedding_blocks[indexes[block_name]]
             indexes[block_name] += 1
             blocks.append(VocabEmbeddingBlock(vocab_size=block.vocab_size))
+        elif block_name == "LayerNorm":
+            block = patcher.layer_norm_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            blocks.append(LayerNormBlock(eps=_layer_norm_eps(block.attributes, f"Patcher '{patcher.name}'")))
         elif block_name == "Transformer":
             block = patcher.transformer_blocks[indexes[block_name]]
             indexes[block_name] += 1

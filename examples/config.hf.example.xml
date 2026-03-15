@@ -58,6 +58,7 @@
       </Train>
       <RoPE base="10000" scale="1.0" />
       <Transformer layers="2" hidden_size="768" />
+      <LayerNorm />
     </Patcher>
 
     <Trunk name="main_trunk" context="2048">

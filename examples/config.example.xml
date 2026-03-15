@@ -73,6 +73,7 @@
       <RoPE base="10000" scale="1.0" />
       <Transformer layers="2" hidden_size="1024" />
       <PosEmbedding type="learned" />
+      <LayerNorm />
     </Patcher>
 
     <Patcher name="patcher_code" patch_size="512">
@@ -86,6 +87,7 @@
       <PosEmbedding type="learned" />
       <RoPE base="500000" scale="1.0" />
       <Transformer layers="3" hidden_size="1536" />
+      <LayerNorm />
     </Patcher>
 
     <Trunk name="main_trunk" context="32768">

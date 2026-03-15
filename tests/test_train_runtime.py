@@ -49,8 +49,8 @@ def test_summary_smoke_path_exposes_train_fields() -> None:
 def test_transformer_layers_expand_runtime_block_counts() -> None:
     runtime = _build_runtime(EXAMPLE_CONFIG_PATH)
 
-    assert len(runtime.patchers[0].blocks) == 4
-    assert len(runtime.patchers[1].blocks) == 5
+    assert len(runtime.patchers[0].blocks) == 5
+    assert len(runtime.patchers[1].blocks) == 6
     assert len(runtime.trunk.blocks) == 26
 
 

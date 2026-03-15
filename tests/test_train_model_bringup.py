@@ -33,13 +33,14 @@ def test_resolved_defaults_and_overrides(tmp_path: Path) -> None:
 def test_patcher_forward_order(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path)
     trace = runtime.smoke("hello").execution_trace
-    patcher_trace = [t for t in trace if t.startswith(("Patcher", "RoPE", "Transformer", "PosEmbedding"))]
-    assert patcher_trace[:5] == [
+    patcher_trace = [t for t in trace if t.startswith(("Patcher", "RoPE", "Transformer", "PosEmbedding", "LayerNorm"))]
+    assert patcher_trace[:6] == [
         "PatcherStart(p1)",
         "RoPE(d_model=2048,n_heads=16,base=16000.0,scale=0.5)",
         "Transformer(d_model=1024,n_heads=8)",
         "PosEmbedding",
         "Transformer(d_model=1536,n_heads=12)",
+        "LayerNorm(eps=1e-05)",
     ]
 
 
@@ -171,6 +172,7 @@ def _write_config(tmp_path: Path) -> Path:
       <Transformer d_model="1024" n_heads="8" />
       <PosEmbedding type="learned" />
       <Transformer d_model="1536" n_heads="12" />
+      <LayerNorm />
     </Patcher>
     <Trunk name="t1" context="2048">
       <Train steps="100"><Optimizer type="adamw" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>

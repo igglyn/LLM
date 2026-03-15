@@ -17,6 +17,7 @@ from .specs import (
     ExpertSpec,
     FilterSpec,
     GroupSpec,
+    LayerNormBlockSpec,
     MixtureBuildSpec,
     MixOfExpertsSpec,
     ModelRefSpec,
@@ -191,6 +192,7 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
     rope_blocks: List[RoPEBlockSpec] = []
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = []
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = []
+    layer_norm_blocks: List[LayerNormBlockSpec] = []
     transformer_blocks: List[TransformerBlockSpec] = []
     block_order: List[str] = []
 
@@ -216,6 +218,9 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
                 VocabEmbeddingBlockSpec(vocab_size=int(_required_attr(child, "vocab_size")), attributes=dict(child.attrib))
             )
             block_order.append("VocabEmbedding")
+        elif child.tag == "LayerNorm":
+            layer_norm_blocks.append(LayerNormBlockSpec(attributes=dict(child.attrib)))
+            block_order.append("LayerNorm")
         elif child.tag == "Transformer":
             transformer_blocks.append(
                 TransformerBlockSpec(
@@ -237,6 +242,7 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
         rope_blocks=rope_blocks,
         pos_embedding_blocks=pos_embedding_blocks,
         vocab_embedding_blocks=vocab_embedding_blocks,
+        layer_norm_blocks=layer_norm_blocks,
         transformer_blocks=transformer_blocks,
         block_order=block_order,
     )

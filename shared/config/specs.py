@@ -181,6 +181,11 @@ class VocabEmbeddingBlockSpec:
 
 
 @dataclass(frozen=True)
+class LayerNormBlockSpec:
+    attributes: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TransformerBlockSpec:
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
@@ -212,6 +217,7 @@ class PatcherSpec:
     rope_blocks: List[RoPEBlockSpec] = field(default_factory=list)
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
+    layer_norm_blocks: List[LayerNormBlockSpec] = field(default_factory=list)
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
@@ -301,6 +307,7 @@ class ResolvedPatcherSpec:
     rope_blocks: List[ResolvedRoPEBlockSpec] = field(default_factory=list)
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
+    layer_norm_blocks: List[LayerNormBlockSpec] = field(default_factory=list)
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
