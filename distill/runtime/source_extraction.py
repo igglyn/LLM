@@ -16,10 +16,15 @@ class SourceExtractionError(ValueError):
 def run_source_extraction(config: ConfigSpec) -> list[ExtractedDocument]:
     docs: list[ExtractedDocument] = []
     for dataset_entry in config.dataset.source_extraction.dataset_entries:
+        max_entries = _max_entries_limit(dataset_entry.filters)
+        accepted_count = 0
         extracted = _extract_dataset_entry(dataset_entry)
         for doc in extracted:
             if _passes_filters(doc, dataset_entry.filters):
+                if max_entries is not None and accepted_count >= max_entries:
+                    break
                 docs.append(doc)
+                accepted_count += 1
     return docs
 
 
@@ -105,3 +110,12 @@ def _passes_filters(doc: ExtractedDocument, filters: Iterable[FilterSpec]) -> bo
         if filter_type == "contains" and value is not None and value not in doc.text:
             return False
     return True
+
+
+def _max_entries_limit(filters: Iterable[FilterSpec]) -> int | None:
+    for filter_spec in filters:
+        if filter_spec.attributes.get("type") == "max_entries":
+            value = filter_spec.attributes.get("value")
+            if value is not None:
+                return int(value)
+    return None

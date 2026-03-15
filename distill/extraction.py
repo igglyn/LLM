@@ -16,9 +16,14 @@ class ExtractionError(ValueError):
 def run_extraction(config: ResolvedConfigSpec) -> list[NormalizedDocument]:
     output: list[NormalizedDocument] = []
     for entry in config.dataset.source_extraction.dataset_entries:
+        max_entries = _max_entries_limit(entry.filters)
+        accepted_count = 0
         for doc in _extract_entry(entry):
             if _passes_filters(doc, entry.filters):
+                if max_entries is not None and accepted_count >= max_entries:
+                    break
                 output.append(doc)
+                accepted_count += 1
     return output
 
 
@@ -101,3 +106,12 @@ def _passes_filters(doc: NormalizedDocument, filters: list[FilterSpec]) -> bool:
         if filter_type == "contains" and value is not None and value not in doc.text:
             return False
     return True
+
+
+def _max_entries_limit(filters: list[FilterSpec]) -> int | None:
+    for filter_spec in filters:
+        if filter_spec.attributes.get("type") == "max_entries":
+            value = filter_spec.attributes.get("value")
+            if value is not None:
+                return int(value)
+    return None
