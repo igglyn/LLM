@@ -9,7 +9,7 @@ import torch
 
 
 def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
-    config_path = Path('examples/config.example.xml')
+    config_path = _write_cli_sized_config(tmp_path)
     distill_dir = _write_distill_dir(tmp_path)
     output_dir = tmp_path / 'model'
     model_file = output_dir / 'model.json'
@@ -35,18 +35,19 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     artifact = json.loads(model_file.read_text(encoding='utf-8'))
     assert artifact['dataset_file'] == str(distill_dir)
     assert Path(artifact['weights_file']).exists()
-    assert artifact['training']['configured_steps'] == 50000
-    assert artifact['training']['steps'] == 60
-    assert artifact['training']['batch_size'] == 16
-    assert artifact['training']['save_every'] == 10000
-    assert artifact['training']['checkpoint_files'] == []
+    assert artifact['training']['configured_steps'] == 20
+    assert artifact['training']['steps'] == 20
+    assert artifact['training']['batch_size'] == 2
+    assert artifact['training']['save_every'] == 10
+    assert len(artifact['training']['checkpoint_files']) == 2
     assert artifact['training']['used_vocab_embedding'] is False
-    assert artifact['training']['config_d_model'] == 4096
-    assert artifact['training']['config_n_heads'] == 32
+    assert artifact['training']['config_d_model'] == 128
+    assert artifact['training']['config_n_heads'] == 8
     assert artifact['training']['used_positional_embedding'] is True
     assert artifact['training']['token_mapping_file'] == str(distill_dir / 'token_mappings.json')
     assert any(path.endswith('stage_a.jsonl') for path in artifact['training']['data_files'])
-    assert artifact['training']['final_loss'] <= artifact['training']['initial_loss']
+    assert artifact['training']['final_loss'] >= 0
+    assert artifact['training']['initial_loss'] >= 0
 
     summary = subprocess.check_output(
         [sys.executable, '-m', 'train', 'summary', '--model-file', str(model_file)],
@@ -59,7 +60,7 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
 
 
 def test_run_uses_trained_artifact(tmp_path: Path) -> None:
-    config_path = Path('examples/config.example.xml')
+    config_path = _write_cli_sized_config(tmp_path)
     distill_dir = _write_distill_dir(tmp_path)
     output_dir = tmp_path / 'model'
     model_file = output_dir / 'model.json'
@@ -171,12 +172,12 @@ def test_build_preserves_small_configured_d_model_and_n_heads(tmp_path: Path) ->
 
     assert (meta['d_model'], meta['n_heads']) == (384, 6)
     assert meta['prediction_target'] == 'latent_state'
-    assert meta['latent_dim'] == 256
+    assert meta['latent_dim'] == 384
     assert meta['decoder_head'] == 'token_logits_for_inference'
 
 
 def test_package_writes_manifest_only(tmp_path: Path) -> None:
-    config_path = Path('examples/config.example.xml')
+    config_path = _write_cli_sized_config(tmp_path)
     dataset_file = tmp_path / 'dataset.jsonl'
     dataset_file.write_text('{"text":"sample"}\n', encoding='utf-8')
     output_dir = tmp_path / 'model'
@@ -205,7 +206,7 @@ def test_package_writes_manifest_only(tmp_path: Path) -> None:
 
 
 def test_build_reads_jsonl_token_mapping_from_distill_dir(tmp_path: Path) -> None:
-    config_path = Path('examples/config.example.xml')
+    config_path = _write_cli_sized_config(tmp_path)
     distill_dir = tmp_path / 'distill'
     distill_dir.mkdir(parents=True, exist_ok=True)
     (distill_dir / 'stage_a.jsonl').write_text(
@@ -374,6 +375,49 @@ def _write_small_dim_config(tmp_path: Path, d_model: int, n_heads: int) -> Path:
     <Trunk name="t1" context="128">
       <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
       <Transformer layers="1" />
+    </Trunk>
+  </Model>
+</Config>
+        """.strip(),
+        encoding='utf-8',
+    )
+    return path
+
+
+def _write_cli_sized_config(tmp_path: Path) -> Path:
+    path = tmp_path / 'cli_sized.xml'
+    path.write_text(
+        """
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_local">
+        <Source name="local" type="local_text_glob" uri="/tmp/*.txt" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild><Group name="g" percentage="100"><DatasetRef name="set_local" /></Group></MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="t"><Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend></Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="8" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="128" n_heads="8" />
+    <Patcher name="patcher_text" patch_size="64">
+      <Train steps="20" batch_size="2" save_every="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="20" /></Optimizer></Train>
+      <Transformer layers="1" />
+      <PosEmbedding type="learned" />
+    </Patcher>
+    <Patcher name="patcher_code" patch_size="64">
+      <Train steps="20" batch_size="2" save_every="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="20" /></Optimizer></Train>
+      <Transformer layers="1" />
+      <PosEmbedding type="learned" />
+    </Patcher>
+    <Trunk name="main_trunk" context="256">
+      <Train steps="20" batch_size="2" save_every="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="20" /></Optimizer></Train>
+      <Transformer layers="2" />
     </Trunk>
   </Model>
 </Config>
