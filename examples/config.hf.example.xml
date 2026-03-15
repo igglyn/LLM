@@ -7,6 +7,7 @@
           name="hf-dataset"
           type="huggingface"
           uri="wikitext"
+          config="wikitext-103-v1"
           split="train"
           text_column="text"
         />

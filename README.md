@@ -68,7 +68,7 @@ pytest
 
 A full Hugging Face-based example config is available at `examples/config.hf.example.xml`.
 It demonstrates both:
-- dataset extraction via `<Source type="huggingface" ... />`
+- dataset extraction via `<Source type="huggingface" ... />` (including optional `config="..."` dataset field)
 - teacher model runner via `<Backend type="huggingface"> ... </Backend>`
 
 Example commands:

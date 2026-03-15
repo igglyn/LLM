@@ -70,7 +70,11 @@ def _extract_huggingface(dataset_entry: DatasetEntrySpec) -> list[ExtractedDocum
     source = dataset_entry.source
     split = source.attributes.get("split", "train")
     text_column = source.attributes.get("text_column", "text")
-    data = load_dataset(source.uri, split=split)
+    dataset_config = source.attributes.get("config")
+    if dataset_config is not None:
+        data = load_dataset(source.uri, dataset_config, split=split)
+    else:
+        data = load_dataset(source.uri, split=split)
 
     mapping = _split_mapping(dataset_entry)
     target_split = mapping.get(split, split)
@@ -84,7 +88,7 @@ def _extract_huggingface(dataset_entry: DatasetEntrySpec) -> list[ExtractedDocum
                 split=target_split,
                 text=text,
                 byte_length=len(text.encode("utf-8")),
-                metadata={"hf_split": split},
+                metadata={"hf_split": split, "hf_config": dataset_config},
             )
         )
     return rows
