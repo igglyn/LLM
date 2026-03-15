@@ -51,6 +51,8 @@ def train_model(
     vocab_size = max(token_to_id.values()) + 1
     config_d_model = _infer_d_model(model_runtime)
     d_model = min(config_d_model, 256)
+    config_n_heads = _infer_n_heads(model_runtime)
+    n_heads = _safe_n_heads(d_model, config_n_heads)
     max_seq_len = min(context_limit, max(len(sequence) for sequence in sequences))
     transformer_layer_count = min(_count_transformer_layers(model_runtime), 6)
     moe_expert_count = min(_count_moe_experts(model_runtime), 4)
@@ -61,6 +63,7 @@ def train_model(
         max_seq_len=max_seq_len,
         use_positional_embedding=has_pos_embedding,
         transformer_layers=transformer_layer_count,
+        n_heads=n_heads,
         moe_expert_count=moe_expert_count,
     )
     optimizer = _build_optimizer(
@@ -125,6 +128,8 @@ def train_model(
                 "vocab_size": vocab_size,
                 "d_model": d_model,
                 "config_d_model": config_d_model,
+                "config_n_heads": config_n_heads,
+                "n_heads": n_heads,
                 "max_seq_len": max_seq_len,
                 "context_limit": context_limit,
                 "use_positional_embedding": has_pos_embedding,
@@ -163,6 +168,7 @@ def train_model(
         "transformer_layers": transformer_layer_count,
         "moe_expert_count": moe_expert_count,
         "config_d_model": config_d_model,
+        "config_n_heads": config_n_heads,
         "initial_loss": initial_loss,
         "final_loss": final_loss,
         "weights_file": str(weights_file),
@@ -187,12 +193,14 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
     config_d_model = int(meta.get("config_d_model", expected_d_model))
     if config_d_model != expected_d_model:
         raise ValueError(f"weights config_d_model mismatch: expected={expected_d_model} got={config_d_model}")
+    config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
 
     vocab_size = int(meta.get("vocab_size", max(int(v) for v in token_to_id.values()) + 1))
     max_seq_len = int(meta.get("max_seq_len", 8))
     use_positional_embedding = bool(meta.get("use_positional_embedding", _has_positional_embedding(model_runtime)))
     transformer_layers = int(meta.get("transformer_layers", _count_transformer_layers(model_runtime)))
     moe_expert_count = int(meta.get("moe_expert_count", _count_moe_experts(model_runtime)))
+    n_heads = _safe_n_heads(d_model, int(meta.get("n_heads", config_n_heads)))
 
     model = _TrainLanguageModel(
         vocab_size=vocab_size,
@@ -200,6 +208,7 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
         max_seq_len=max_seq_len,
         use_positional_embedding=use_positional_embedding,
         transformer_layers=transformer_layers,
+        n_heads=n_heads,
         moe_expert_count=moe_expert_count,
     )
     model.load_state_dict(state_dict)
@@ -221,8 +230,10 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
         "score": float(torch.max(logits[0, -1]).item()),
         "d_model": d_model,
         "transformer_layers": transformer_layers,
+        "n_heads": n_heads,
         "moe_expert_count": moe_expert_count,
         "config_d_model": config_d_model,
+        "config_n_heads": config_n_heads,
         "trace": state.execution_trace,
         "moe_metrics": state.moe_metrics,
     }
@@ -236,14 +247,22 @@ class _TrainLanguageModel(nn.Module):
         max_seq_len: int,
         use_positional_embedding: bool,
         transformer_layers: int,
+        n_heads: int,
         moe_expert_count: int,
     ) -> None:
         super().__init__()
         self.vocab_embedding = nn.Embedding(vocab_size, d_model)
         self.positional_embedding = nn.Embedding(max_seq_len, d_model) if use_positional_embedding else None
-        self.layers = nn.ModuleList([nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, d_model), nn.GELU()) for _ in range(max(1, transformer_layers))])
-        self.moe_gate = nn.Linear(d_model, max(1, moe_expert_count)) if moe_expert_count > 0 else None
-        self.moe_experts = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(max(0, moe_expert_count))])
+        self.layers = nn.ModuleList(
+            [
+                _TransformerDecoderBlock(
+                    d_model=d_model,
+                    n_heads=max(1, n_heads),
+                    moe_expert_count=max(0, moe_expert_count),
+                )
+                for _ in range(max(1, transformer_layers))
+            ]
+        )
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size)
 
@@ -253,16 +272,46 @@ class _TrainLanguageModel(nn.Module):
             positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
             x = x + self.positional_embedding(positions)
 
+        seq_len = input_ids.shape[1]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
-            x = x + layer(x)
-
-        if self.moe_gate is not None and self.moe_experts:
-            gate_scores = torch.softmax(self.moe_gate(x), dim=-1)
-            expert_outputs = torch.stack([expert(x) for expert in self.moe_experts], dim=-2)
-            x = torch.sum(expert_outputs * gate_scores.unsqueeze(-1), dim=-2)
+            x = layer(x, causal_mask)
 
         x = self.norm(x)
         return self.head(x)
+
+
+class _TransformerDecoderBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, moe_expert_count: int) -> None:
+        super().__init__()
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, batch_first=True)
+        self.ffn_norm = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Linear(4 * d_model, d_model),
+        )
+        self.moe_gate = nn.Linear(d_model, moe_expert_count) if moe_expert_count > 0 else None
+        self.moe_experts = (
+            nn.ModuleList([nn.Sequential(nn.Linear(d_model, d_model), nn.GELU()) for _ in range(moe_expert_count)])
+            if moe_expert_count > 0
+            else nn.ModuleList()
+        )
+
+    def forward(self, x: torch.Tensor, causal_mask: torch.Tensor) -> torch.Tensor:
+        attn_input = self.attn_norm(x)
+        attn_out, _ = self.attn(attn_input, attn_input, attn_input, attn_mask=causal_mask, need_weights=False)
+        x = x + attn_out
+
+        ffn_input = self.ffn_norm(x)
+        if self.moe_gate is not None and self.moe_experts:
+            gate = torch.softmax(self.moe_gate(ffn_input), dim=-1)
+            expert_outputs = torch.stack([expert(ffn_input) for expert in self.moe_experts], dim=-2)
+            ffn_out = torch.sum(expert_outputs * gate.unsqueeze(-1), dim=-2)
+        else:
+            ffn_out = self.ffn(ffn_input)
+        return x + ffn_out
 
 
 def _build_optimizer(optimizer_type: str, parameters: Any, weight_decay: float) -> torch.optim.Optimizer:
@@ -479,6 +528,26 @@ def _infer_d_model(model_runtime: ModelRuntime) -> int:
         if isinstance(d_model, int) and d_model > 0:
             return d_model
     return 128
+
+
+def _infer_n_heads(model_runtime: ModelRuntime) -> int:
+    for patcher in model_runtime.patchers:
+        for block in patcher.blocks:
+            n_heads = getattr(block, "n_heads", None)
+            if isinstance(n_heads, int) and n_heads > 0:
+                return n_heads
+    for block in model_runtime.trunk.blocks:
+        n_heads = getattr(block, "n_heads", None)
+        if isinstance(n_heads, int) and n_heads > 0:
+            return n_heads
+    return 8
+
+
+def _safe_n_heads(d_model: int, configured_heads: int) -> int:
+    candidate = max(1, min(configured_heads, d_model))
+    while d_model % candidate != 0 and candidate > 1:
+        candidate -= 1
+    return max(1, candidate)
 
 
 __all__ = [
