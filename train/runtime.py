@@ -308,6 +308,7 @@ def run_trained_model(
         transformer_layers=transformer_layers,
         n_heads=n_heads,
         moe_expert_count=moe_expert_count,
+        dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
     )
     model.load_state_dict(state_dict)
     model.eval()
@@ -362,7 +363,7 @@ class _TrainLanguageModel(nn.Module):
         transformer_layers: int,
         n_heads: int,
         moe_expert_count: int,
-        dropout: float,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.vocab_embedding = nn.Embedding(vocab_size, d_model) if use_vocab_embedding else None
@@ -782,6 +783,7 @@ def generate_tokens(
         transformer_layers=int(meta.get("transformer_layers", _count_transformer_layers(model_runtime))),
         n_heads=n_heads,
         moe_expert_count=int(meta.get("moe_expert_count", _count_moe_experts(model_runtime))),
+        dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
     )
     model.load_state_dict(state_dict)
     model.eval()
