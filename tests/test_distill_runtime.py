@@ -50,6 +50,64 @@ def test_local_source_extraction_max_entries_filter_limits_output(tmp_path: Path
     assert len(docs) == 2
 
 
+
+
+def test_run_extract_writes_one_jsonl_per_dataset_entry(tmp_path: Path) -> None:
+    docs_a = tmp_path / "docs_a"
+    docs_b = tmp_path / "docs_b"
+    docs_a.mkdir()
+    docs_b.mkdir()
+    (docs_a / "a.txt").write_text("alpha", encoding="utf-8")
+    (docs_b / "b.txt").write_text("bravo", encoding="utf-8")
+
+    config_path = tmp_path / "config.xml"
+    config_path.write_text(
+        f"""
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_a">
+        <Source name="a" type="local_text_glob" uri="{docs_a / '*.txt'}" />
+      </DatasetEntry>
+      <DatasetEntry name="set_b">
+        <Source name="b" type="local_text_glob" uri="{docs_b / '*.txt'}" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild target_documents="2" random_seed="0" depletion_policy="rebalance">
+      <Group name="g" percentage="100">
+        <DatasetRef name="set_a" />
+        <DatasetRef name="set_b" />
+      </Group>
+    </MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="teacher_local">
+          <Backend type="dummy_local">
+            <ModelRef name_or_path="dummy" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></Stage>
+      <Stage name="StageB" enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></Stage>
+      <Stage name="StageC" enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="1024" n_heads="8" />
+    <Patcher name="p1" patch_size="128"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Patcher>
+    <Trunk name="t1" context="1024"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Trunk>
+  </Model>
+</Config>
+""",
+        encoding="utf-8",
+    )
+
+    extracted_dir = tmp_path / "extracted"
+    assert run_extract(config_path, extracted_dir) == 2
+    assert (extracted_dir / "set_a.jsonl").exists()
+    assert (extracted_dir / "set_b.jsonl").exists()
+
 def test_mixture_grouping_and_rebalance_selection(tmp_path: Path) -> None:
     config_path = tmp_path / "mix_config.xml"
     config_path.write_text(_mixture_config_xml(), encoding="utf-8")
@@ -74,7 +132,7 @@ def test_stage_a_end_to_end_smoke_with_dummy_teacher(tmp_path: Path) -> None:
     config_path = tmp_path / "config.xml"
     config_path.write_text(_runtime_config_xml(str(docs_dir / "*.txt"), min_bytes="1"), encoding="utf-8")
 
-    extracted_path = tmp_path / "extracted.jsonl"
+    extracted_path = tmp_path / "extracted"
     mixed_path = tmp_path / "mixed.jsonl"
     stage_a_path = tmp_path / "stage_a.jsonl"
 
