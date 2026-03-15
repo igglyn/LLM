@@ -46,6 +46,16 @@ Boundary rule:
   - consumes resolved model section
   - builds compositional runtime model and supports `build`, `package`, `run`, `summary`, `smoke`
 
+## Patcher → trunk wiring and prediction target
+
+- The runtime is strictly sequential: each configured patcher runs in XML order, and only after all patchers finish does the trunk run.
+- Patcher → trunk transfer in runtime is **state passing**, not a separate learned adapter object: every block receives and returns one shared `RuntimeState` (`text`, optional tensor, trace, metrics).
+- In smoke/dummy execution, this shared state includes a tensor when present, so patchers effectively pass forward an updated tensor/state that trunk continues from.
+- In actual `train build` training, the executable PyTorch model is assembled from *counts/capabilities inferred from both patchers and trunk* (embedding usage, number of transformer layers, MoE expert count, context limit from trunk).
+- That train-time network starts from token IDs and creates a dense `[batch, seq, d_model]` representation (embedding or projection), then runs transformer/MoE layers.
+- The training objective is shifted **latent-state prediction**: inputs are token windows, and targets are latent states encoded from the next-token window (`target_ids`) and optimized with masked MSE.
+- Token logits are still decoded from predicted latents for inference/generation, but the primary supervised target during training is latent state, not raw token IDs.
+
 ## Commands
 
 ```bash

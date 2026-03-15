@@ -94,11 +94,14 @@ def train_model(
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr
 
-        logits = model(input_ids)
-        loss = nn.functional.cross_entropy(
-            logits.reshape(-1, vocab_size),
-            target_ids.reshape(-1),
-            ignore_index=token_to_id["<pad>"],
+        predicted_latents = model.forward_latents(input_ids)
+        with torch.no_grad():
+            target_latents = model.encode_target_latents(target_ids)
+        loss = _masked_latent_mse(
+            predicted_latents=predicted_latents,
+            target_latents=target_latents,
+            target_ids=target_ids,
+            pad_id=token_to_id["<pad>"],
         )
 
         optimizer.zero_grad()
@@ -148,6 +151,9 @@ def train_model(
                     {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
                     for scheduler in model_runtime.trunk.train_config.schedulers
                 ],
+                "prediction_target": "latent_state",
+                "latent_dim": model.latent_dim,
+                "decoder_head": "token_logits_for_inference",
             },
         },
         weights_file,
@@ -274,26 +280,41 @@ class _TrainLanguageModel(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(d_model)
+        self.latent_dim = min(256, d_model)
+        self.latent_head = nn.Linear(d_model, self.latent_dim)
+        self.latent_to_model = nn.Linear(self.latent_dim, d_model)
         self.head = nn.Linear(d_model, vocab_size)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def encode_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.vocab_embedding is not None:
             x = self.vocab_embedding(input_ids)
         elif self.token_projection is not None:
             x = self.token_projection(input_ids.to(torch.float32).unsqueeze(-1))
         else:
             raise ValueError("model is missing both vocab_embedding and token_projection")
+
         if self.positional_embedding is not None:
             positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
             x = x + self.positional_embedding(positions)
+        return x
 
+    def encode_target_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.latent_head(self.encode_tokens(input_ids))
+
+    def forward_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
+        x = self.encode_tokens(input_ids)
         seq_len = input_ids.shape[1]
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
             x = layer(x, causal_mask)
-
         x = self.norm(x)
-        return self.head(x)
+        return self.latent_head(x)
+
+    def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        return self.head(self.latent_to_model(latents))
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.decode_latents(self.forward_latents(input_ids))
 
 
 class _TransformerDecoderBlock(nn.Module):
@@ -327,6 +348,19 @@ class _TransformerDecoderBlock(nn.Module):
         else:
             ffn_out = self.ffn(ffn_input)
         return x + ffn_out
+
+
+def _masked_latent_mse(
+    predicted_latents: torch.Tensor,
+    target_latents: torch.Tensor,
+    target_ids: torch.Tensor,
+    pad_id: int,
+) -> torch.Tensor:
+    mask = (target_ids != pad_id).unsqueeze(-1).to(predicted_latents.dtype)
+    squared_error = (predicted_latents - target_latents) ** 2
+    masked_error = squared_error * mask
+    denom = torch.clamp(mask.sum() * predicted_latents.shape[-1], min=1.0)
+    return masked_error.sum() / denom
 
 
 def _build_optimizer(optimizer_type: str, parameters: Any, weight_decay: float) -> torch.optim.Optimizer:
