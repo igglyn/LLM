@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="hf_wikitext">
+        <Source
+                    name="hf-dataset"
+                    type="huggingface"
+                    uri="wikitext"
+                    config="wikitext-103-v1"
+                    split="train"
+                    text_column="text"
+                />
+        <SplitMapping>
+          <Map from="train" to="train" />
+        </SplitMapping>
+        <Filter type="min_bytes" value="32" />
+        <Filter type="max_bytes" value="2048" />
+        <Filter type="max_entries" value="20000" />
+      </DatasetEntry>
+    </SourceExtraction>
+
+    <MixtureBuild strategy="weighted">
+      <Group name="hf_group" percentage="100">
+        <DatasetRef name="hf_wikitext" />
+      </Group>
+    </MixtureBuild>
+
+    <Distillation objective="logits+structure">
+      <Teachers>
+        <Teacher name="teacher_hf">
+          <Backend type="huggingface">
+            <ModelRef name_or_path="gpt2" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+
+      <Stage name="StageA" enabled="true" teacher_ref="teacher_hf">
+        <TopKLogits k="5" temperature="0.0" />
+      </Stage>
+    </Distillation>
+  </Dataset>
+
+  <Model>
+    <Defaults d_model="384" n_heads="6" />
+
+    <Patcher name="patcher_text" patch_size="8">
+      <Train steps="10000" batch_size="1" save_every="1000">
+        <Optimizer type="adamw" weight_decay="0.01" dropout="0.1" grad_clip="0.33">
+          <Scheduler
+                        type="warmup"
+                        start_step="0"
+                        end_step="1000"
+                        min_lr="1e-5"
+                        max_lr="1e-4"
+              />
+          <Scheduler
+                        type="cosine"
+                        start_step="1000"
+                        end_step="5000"
+                        max_lr="1e-4"
+                        min_lr="1e-5"
+                    />
+          <Scheduler
+                        type="loss_threshold"
+                        start_step="1000"
+                        end_step="5000"
+                        monitor="train_loss"
+                        threshold="3e-4"
+                        decay_factor="0.1"
+                    />
+          <Scheduler
+                        type="loss_threshold"
+                        start_step="3000"
+                        end_step="5000"
+                        monitor="train_loss"
+                        threshold="8e-5"
+                        decay_factor="0.1"
+              />
+          <Offset start_step="5000" end_step="10000" />
+        </Optimizer>
+      </Train>
+      <PosEmbedding type="learned" />
+      <VocabEmbedding vocab_size="50257" />
+      <Transformer layers="2" />
+    </Patcher>
+
+    <Trunk name="main_trunk" context="64">
+      <Train steps="10000" batch_size="1" save_every="1000">
+        <Optimizer type="adamw" weight_decay="0.1" dropout="0.1" grad_clip="1.0">
+          <Offset start_step="0" end_step="5000" />
+          <Scheduler
+                        type="warmup"
+                        start_step="5000"
+                        end_step="6000"
+                        min_lr="3e-5"
+                        max_lr="3e-4"
+              />
+          <Scheduler
+                        type="cosine"
+                        start_step="6000"
+                        end_step="10000"
+                        max_lr="3e-4"
+                        min_lr="3e-5"
+              />
+        </Optimizer>
+      </Train>
+      <PosEmbedding type="learned" />
+      <Transformer layers="6" />
+    </Trunk>
+  </Model>
+</Config>
