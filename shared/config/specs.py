@@ -154,6 +154,8 @@ class TrainSpec:
 class RoPEBlockSpec:
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
+    base: Optional[float] = None
+    scale: Optional[float] = None
     attributes: Dict[str, str] = field(default_factory=dict)
 
 
@@ -161,6 +163,8 @@ class RoPEBlockSpec:
 class DRopeBlockSpec:
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
+    base: Optional[float] = None
+    scale: Optional[float] = None
     attributes: Dict[str, str] = field(default_factory=dict)
 
 
@@ -251,6 +255,8 @@ class ResolvedTransformerBlockSpec:
 class ResolvedRoPEBlockSpec:
     d_model: int
     n_heads: int
+    base: float
+    scale: float
     attributes: Dict[str, str] = field(default_factory=dict)
 
 
@@ -258,6 +264,8 @@ class ResolvedRoPEBlockSpec:
 class ResolvedDRopeBlockSpec:
     d_model: int
     n_heads: int
+    base: float
+    scale: float
     attributes: Dict[str, str] = field(default_factory=dict)
 
 

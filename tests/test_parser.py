@@ -42,6 +42,10 @@ def test_parse_hf_example_config_smoke() -> None:
     assert len(config.dataset.source_extraction.dataset_entries) == 1
     assert config.dataset.source_extraction.dataset_entries[0].source.source_type == "huggingface"
     assert config.dataset.distillation.teachers.teachers[0].backend.backend_type == "huggingface"
+    assert config.model.patchers[0].rope_blocks[0].base == 10000.0
+    assert config.model.patchers[0].rope_blocks[0].scale == 1.0
+    assert config.model.trunk.drope_blocks[0].base == 10000.0
+    assert config.model.trunk.drope_blocks[0].scale == 1.0
 
 
 def test_scheduler_list_preserves_order() -> None:
@@ -113,6 +117,54 @@ def test_explicit_block_override_beats_inherited_values(tmp_path: Path) -> None:
     block = resolved.model.patchers[0].transformer_blocks[0]
     assert block.d_model == 3072
     assert block.n_heads == 24
+
+
+def test_rope_drope_base_and_scale_defaults_and_overrides(tmp_path: Path) -> None:
+    xml = """
+<Config>
+  <Dataset>
+    <SourceExtraction />
+    <MixtureBuild />
+    <Distillation>
+      <Teachers>
+        <Teacher name="t">
+          <Backend type="x">
+            <ModelRef name_or_path="m" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+      <StageA enabled="true" teacher_ref="t"><TopKLogits k="16" /></StageA>
+      <StageB enabled="true" teacher_ref="t"><LongContext max_tokens="1024" /></StageB>
+      <StageC enabled="true" teacher_ref="t"><StructuredOutputs schema="json" /></StageC>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="1024" n_heads="8" />
+    <Patcher name="p1" patch_size="128">
+      <Train mode="finetune"><Optimizer type="adamw" lr="0.001" weight_decay="0.1" /></Train>
+      <RoPE base="32000" scale="0.8" />
+      <Transformer />
+    </Patcher>
+    <Trunk name="t1" context="1024">
+      <Train mode="full"><Optimizer type="adamw" lr="0.0005" weight_decay="0.1" /></Train>
+      <DRope />
+      <Transformer />
+    </Trunk>
+  </Model>
+</Config>
+"""
+    path = tmp_path / "rope_drope_defaults.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    resolved = resolve_config(parse_config(path))
+    rope = resolved.model.patchers[0].rope_blocks[0]
+    drope = resolved.model.trunk.drope_blocks[0]
+
+    assert rope.base == 32000.0
+    assert rope.scale == 0.8
+    assert drope.base == 10000.0
+    assert drope.scale == 1.0
 
 
 def test_resolution_raises_when_transformer_unresolved() -> None:

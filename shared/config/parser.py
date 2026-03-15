@@ -200,6 +200,8 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
                 RoPEBlockSpec(
                     d_model=_optional_int_attr(child, "d_model"),
                     n_heads=_optional_int_attr(child, "n_heads"),
+                    base=_optional_float_attr(child, "base"),
+                    scale=_optional_float_attr(child, "scale"),
                     attributes=dict(child.attrib),
                 )
             )
@@ -248,6 +250,8 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
                 DRopeBlockSpec(
                     d_model=_optional_int_attr(child, "d_model"),
                     n_heads=_optional_int_attr(child, "n_heads"),
+                    base=_optional_float_attr(child, "base"),
+                    scale=_optional_float_attr(child, "scale"),
                     attributes=dict(child.attrib),
                 )
             )
@@ -357,6 +361,13 @@ def _optional_int_attr(elem: ET.Element, attr: str) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _optional_float_attr(elem: ET.Element, attr: str) -> float | None:
+    value = elem.attrib.get(attr)
+    if value is None:
+        return None
+    return float(value)
 
 
 def _find_exact_one(children: Iterable[ET.Element], tag: str, parent: str) -> ET.Element:

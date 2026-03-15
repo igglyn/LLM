@@ -54,7 +54,7 @@
           <Scheduler type="cosine" t_max="1000" min_lr="0.00001" />
         </Optimizer>
       </Train>
-      <RoPE base="10000" />
+      <RoPE base="10000" scale="1.0" />
       <Transformer layers="2" hidden_size="768" />
     </Patcher>
 
@@ -64,7 +64,7 @@
           <Scheduler type="cosine" t_max="5000" min_lr="0.000005" />
         </Optimizer>
       </Train>
-      <DRope scale="1.0" />
+      <DRope base="10000" scale="1.0" />
       <Transformer layers="6" hidden_size="768" />
     </Trunk>
   </Model>

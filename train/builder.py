@@ -41,7 +41,7 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
         if block_name == "RoPE":
             block = patcher.rope_blocks[indexes[block_name]]
             indexes[block_name] += 1
-            blocks.append(RoPEBlock(d_model=block.d_model, n_heads=block.n_heads))
+            blocks.append(RoPEBlock(d_model=block.d_model, n_heads=block.n_heads, base=block.base, scale=block.scale))
         elif block_name == "PosEmbedding":
             block = patcher.pos_embedding_blocks[indexes[block_name]]
             indexes[block_name] += 1
@@ -64,7 +64,7 @@ def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
         if block_name == "DRope":
             block = trunk.drope_blocks[indexes[block_name]]
             indexes[block_name] += 1
-            blocks.append(DRopeBlock(d_model=block.d_model, n_heads=block.n_heads))
+            blocks.append(DRopeBlock(d_model=block.d_model, n_heads=block.n_heads, base=block.base, scale=block.scale))
         elif block_name == "Transformer":
             block = trunk.transformer_blocks[indexes[block_name]]
             indexes[block_name] += 1

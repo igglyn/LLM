@@ -69,7 +69,7 @@
           <Scheduler type="loss_threshold" monitor="val_loss" threshold="1.8" decay_factor="0.5" />
         </Optimizer>
       </Train>
-      <RoPE base="10000" />
+      <RoPE base="10000" scale="1.0" />
       <Transformer layers="2" hidden_size="1024" />
       <PosEmbedding type="learned" />
     </Patcher>
@@ -82,7 +82,7 @@
         </Optimizer>
       </Train>
       <PosEmbedding type="learned" />
-      <RoPE base="500000" />
+      <RoPE base="500000" scale="1.0" />
       <Transformer layers="3" hidden_size="1536" />
     </Patcher>
 
@@ -92,7 +92,7 @@
           <Scheduler type="cosine" t_max="50000" min_lr="0.000005" />
         </Optimizer>
       </Train>
-      <DRope scale="2.0" />
+      <DRope base="10000" scale="2.0" />
       <MixOfExperts name="moe_main">
         <Expert name="expert_1">
           <Transformer layers="8" hidden_size="4096" />
