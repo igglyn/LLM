@@ -36,6 +36,7 @@ class RuntimeTrainConfig:
     optimizer_type: str
     weight_decay: float
     dropout: float
+    grad_clip: float | None
     schedulers: List[RuntimeSchedulerConfig]
 
 

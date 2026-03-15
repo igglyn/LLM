@@ -129,6 +129,22 @@ def test_optimizer_parses_dropout_attribute(tmp_path: Path) -> None:
 
 
 
+def test_optimizer_parses_grad_clip_attribute(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace('weight_decay="0.1"', 'weight_decay="0.1" grad_clip="1.5"')
+    path = tmp_path / "optimizer_with_grad_clip.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(path)
+    assert parsed.model.patchers[0].train.optimizer.grad_clip == 1.5
+    assert parsed.model.trunk.train.optimizer.grad_clip == 1.5
+
+
+
 def test_train_parses_batch_size_and_save_every(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',

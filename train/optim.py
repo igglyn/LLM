@@ -16,5 +16,6 @@ def runtime_train_config_from_spec(train_spec: TrainSpec) -> RuntimeTrainConfig:
         optimizer_type=train_spec.optimizer.optimizer_type,
         weight_decay=train_spec.optimizer.weight_decay,
         dropout=train_spec.optimizer.dropout,
+        grad_clip=train_spec.optimizer.grad_clip,
         schedulers=schedulers,
     )
