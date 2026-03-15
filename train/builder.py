@@ -15,6 +15,19 @@ def build_model_runtime(resolved_config: ResolvedConfigSpec) -> ModelRuntime:
     return ModelRuntime(patchers=patchers, trunk=trunk)
 
 
+def _transformer_layers(attributes: dict[str, str], context: str) -> int:
+    raw_layers = attributes.get("layers")
+    if raw_layers is None:
+        return 1
+    try:
+        layers = int(raw_layers)
+    except ValueError as exc:
+        raise ValueError(f"{context} has invalid Transformer layers='{raw_layers}'.") from exc
+    if layers <= 0:
+        raise ValueError(f"{context} must declare Transformer layers > 0 (got {layers}).")
+    return layers
+
+
 def _build_patcher_runtime(patcher: ResolvedPatcherSpec) -> PatcherRuntime:
     return PatcherRuntime(
         name=patcher.name,
@@ -49,7 +62,8 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
         elif block_name == "Transformer":
             block = patcher.transformer_blocks[indexes[block_name]]
             indexes[block_name] += 1
-            blocks.append(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads))
+            layers = _transformer_layers(block.attributes, f"Patcher '{patcher.name}'")
+            blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
         else:
             raise ValueError(f"Unsupported patcher child block '{block_name}'.")
 
@@ -76,7 +90,8 @@ def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
         elif block_name == "Transformer":
             block = trunk.transformer_blocks[indexes[block_name]]
             indexes[block_name] += 1
-            blocks.append(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads))
+            layers = _transformer_layers(block.attributes, f"Trunk '{trunk.name}'")
+            blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
         elif block_name == "MixOfExperts":
             block = trunk.mix_of_experts_blocks[indexes[block_name]]
             indexes[block_name] += 1
@@ -97,7 +112,8 @@ def _build_moe_runtime(moe: ResolvedMixOfExpertsSpec) -> MixOfExpertsBlock:
                 raise ValueError(f"Unsupported expert child block '{block_name}'.")
             block = expert.transformer_blocks[transformer_index]
             transformer_index += 1
-            expert_blocks.append(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads))
+            layers = _transformer_layers(block.attributes, f"Expert '{expert.name}'")
+            expert_blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
         experts.append(ExpertRuntime(name=expert.name, blocks=expert_blocks))
 
     return MixOfExpertsBlock(name=moe.name, experts=experts)
