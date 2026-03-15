@@ -854,13 +854,7 @@ def _next_token_batch(sequences: list[list[int]], pad_id: int) -> tuple[torch.Te
 
 def _pool_patch_latents(patcher_latents: torch.Tensor, patch_size: int) -> torch.Tensor:
     step = max(1, patch_size)
-    chunks: list[torch.Tensor] = []
-    for start in range(0, patcher_latents.shape[1], step):
-        chunk = patcher_latents[:, start : start + step, :]
-        chunks.append(chunk.mean(dim=1, keepdim=True))
-    if not chunks:
-        return torch.zeros((patcher_latents.shape[0], 0, patcher_latents.shape[2]), dtype=patcher_latents.dtype)
-    return torch.cat(chunks, dim=1)
+    return patcher_latents[:, step - 1 :: step, :]
 
 
 def _next_patch_latent_batch(patcher_latents: torch.Tensor, patch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
