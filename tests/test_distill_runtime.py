@@ -33,6 +33,23 @@ def test_local_source_extraction_with_filter_and_split_mapping(tmp_path: Path) -
     assert docs[0].metadata["path"].endswith("a.txt")
 
 
+
+
+def test_local_source_extraction_max_entries_filter_limits_output(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "a.txt").write_text("aaaa", encoding="utf-8")
+    (docs_dir / "b.txt").write_text("bbbb", encoding="utf-8")
+    (docs_dir / "c.txt").write_text("cccc", encoding="utf-8")
+
+    config_path = tmp_path / "config.xml"
+    config_path.write_text(_runtime_config_xml(str(docs_dir / "*.txt"), min_bytes="1", max_entries="2"), encoding="utf-8")
+    config = parse_config(config_path)
+
+    docs = run_source_extraction(config)
+    assert len(docs) == 2
+
+
 def test_mixture_grouping_and_rebalance_selection(tmp_path: Path) -> None:
     config_path = tmp_path / "mix_config.xml"
     config_path.write_text(_mixture_config_xml(), encoding="utf-8")
@@ -183,7 +200,7 @@ def test_jsonl_schema_validation(tmp_path: Path) -> None:
     assert isinstance(row["metadata"], dict)
 
 
-def _runtime_config_xml(glob_path: str, *, min_bytes: str = "4") -> str:
+def _runtime_config_xml(glob_path: str, *, min_bytes: str = "4", max_entries: str | None = None) -> str:
     return f"""
 <Config>
   <Dataset>
@@ -194,6 +211,7 @@ def _runtime_config_xml(glob_path: str, *, min_bytes: str = "4") -> str:
           <Map from="train" to="train_mapped" />
         </SplitMapping>
         <Filter type="min_bytes" value="{min_bytes}" />
+        {f'<Filter type="max_entries" value="{max_entries}" />' if max_entries is not None else ''}
       </DatasetEntry>
     </SourceExtraction>
     <MixtureBuild target_documents="2" random_seed="7" min_bytes="1" depletion_policy="rebalance">

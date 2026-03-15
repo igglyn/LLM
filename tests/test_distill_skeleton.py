@@ -95,6 +95,27 @@ def test_huggingface_source_type_is_available(tmp_path: Path, monkeypatch: pytes
     assert rows[0].text == "hello hf"
 
 
+
+
+def test_huggingface_max_entries_filter_limits_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_datasets = ModuleType("datasets")
+
+    def fake_load_dataset(name: str, *, split: str):
+        assert name == "my-dataset"
+        assert split == "train"
+        return [{"body": "one"}, {"body": "two"}, {"body": "three"}]
+
+    fake_datasets.load_dataset = fake_load_dataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    config = tmp_path / "hf_config.xml"
+    config.write_text(_hf_config_xml(max_entries="2"), encoding="utf-8")
+    resolved = resolve_config(parse_config(config))
+
+    rows = run_extraction(resolved)
+    assert len(rows) == 2
+
+
 def _config_xml(glob_path: str, *, topk_k: str = "3") -> str:
     return f"""
 <Config>
@@ -131,13 +152,14 @@ def _config_xml(glob_path: str, *, topk_k: str = "3") -> str:
 """
 
 
-def _hf_config_xml() -> str:
-    return """
+def _hf_config_xml(*, max_entries: str | None = None) -> str:
+    return f"""
 <Config>
   <Dataset>
     <SourceExtraction>
       <DatasetEntry name="set_hf">
         <Source name="hf" type="huggingface" uri="my-dataset" split="train" text_column="body" />
+        {f'<Filter type="max_entries" value="{max_entries}" />' if max_entries is not None else ''}
       </DatasetEntry>
     </SourceExtraction>
     <MixtureBuild target_documents="1" random_seed="7">
