@@ -9,6 +9,8 @@ from train.specs import ModelRuntime, RuntimeTrainConfig
 def _train_summary(config: RuntimeTrainConfig) -> dict[str, Any]:
     return {
         "steps": config.steps,
+        "batch_size": config.batch_size,
+        "save_every": config.save_every,
         "optimizer": {
             "type": config.optimizer_type,
             "weight_decay": config.weight_decay,

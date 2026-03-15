@@ -24,7 +24,11 @@ def test_canonical_config_smoke_through_both_apps(tmp_path: Path) -> None:
     _dir = tmp_path / "model_out"
     model_file = _dir / "model.json"
 
-    _run([sys.executable, "-m", "train", "build", "--config", str(config_path), "--dataset-file", str(stage_a), "--output-dir", str(_dir)])
+    distill_dir = tmp_path / "distill_train"
+    distill_dir.mkdir()
+    (distill_dir / "stage_a.jsonl").write_text(stage_a.read_text(encoding="utf-8"), encoding="utf-8")
+
+    _run([sys.executable, "-m", "train", "build", "--config", str(config_path), "--distill-dir", str(distill_dir), "--output-dir", str(_dir)])
     _run([sys.executable, "-m", "train", "summary", "--model-file", str(model_file)])
     _run([sys.executable, "-m", "train", "smoke", "--config", str(config_path), "--text", "hello app smoke"])
 

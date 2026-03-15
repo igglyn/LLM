@@ -31,6 +31,8 @@ class RuntimeSchedulerConfig:
 @dataclass(frozen=True)
 class RuntimeTrainConfig:
     steps: int
+    batch_size: int
+    save_every: int
     optimizer_type: str
     weight_decay: float
     schedulers: List[RuntimeSchedulerConfig]

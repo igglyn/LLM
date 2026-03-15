@@ -11,6 +11,8 @@ def runtime_train_config_from_spec(train_spec: TrainSpec) -> RuntimeTrainConfig:
     ]
     return RuntimeTrainConfig(
         steps=train_spec.steps,
+        batch_size=train_spec.batch_size,
+        save_every=train_spec.save_every,
         optimizer_type=train_spec.optimizer.optimizer_type,
         weight_decay=train_spec.optimizer.weight_decay,
         schedulers=schedulers,
