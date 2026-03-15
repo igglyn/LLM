@@ -375,11 +375,11 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
             )
             continue
         if optimizer_child.tag == "Offset":
-            min_step = _required_attr(optimizer_child, "min_step")
-            max_step = _required_attr(optimizer_child, "max_step")
+            start_step = _required_attr(optimizer_child, "start_step")
+            end_step = _required_attr(optimizer_child, "end_step")
             attributes = dict(optimizer_child.attrib)
-            attributes.setdefault("start_step", min_step)
-            attributes.setdefault("end_step", max_step)
+            attributes.setdefault("start_step", start_step)
+            attributes.setdefault("end_step", end_step)
             schedulers.append(SchedulerSpec(scheduler_type="offset", attributes=attributes))
 
     _validate_scheduler_step_coverage(train_steps, schedulers)
@@ -402,18 +402,19 @@ def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[Schedul
     for scheduler in schedulers:
         scheduler_type = scheduler.scheduler_type
         if scheduler_type == "offset":
-            min_raw = scheduler.attributes.get("min_step", scheduler.attributes.get("start_step"))
-            max_raw = scheduler.attributes.get("max_step", scheduler.attributes.get("end_step"))
-            if min_raw is None or max_raw is None:
-                raise ConfigParseError("<Offset> must include 'min_step' and 'max_step'.")
-            min_step = int(min_raw)
-            max_step = int(max_raw)
-            if min_step < 0 or max_step <= min_step:
-                raise ConfigParseError("<Offset> must satisfy 0 <= min_step < max_step.")
-            if max_step > train_steps:
+            start_raw = scheduler.attributes.get("start_step")
+            end_raw = scheduler.attributes.get("end_step")
+            if start_raw is None or end_raw is None:
+                raise ConfigParseError("<Offset> must include 'start_step' and 'end_step'.")
+            start_step = int(start_raw)
+            end_step = int(end_raw)
+            if start_step < 0 or end_step <= start_step:
+                raise ConfigParseError("<Offset> must satisfy 0 <= start_step < end_step.")
+            if end_step > train_steps:
                 raise ConfigParseError(
-                    f"<Offset> max_step={max_step} exceeds <Train steps=\"{train_steps}\">."
+                    f"<Offset> end_step={end_step} exceeds <Train steps=\"{train_steps}\">."
                 )
+            intervals.append((start_step, end_step, scheduler_type))
             continue
 
         start_raw = scheduler.attributes.get("start_step")

@@ -76,6 +76,27 @@ def test_train_requires_scheduler_step_coverage(tmp_path: Path) -> None:
         parse_config(path)
 
 
+
+
+def test_offset_scheduler_counts_toward_train_step_coverage(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace(
+        '<Scheduler type="cosine" start_step="0" end_step="100" />',
+        '<Scheduler type="cosine" start_step="0" end_step="10" /><Offset start_step="10" end_step="100" />',
+        1,
+    )
+    path = tmp_path / "offset_coverage.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(path)
+    schedulers = parsed.model.patchers[0].train.optimizer.schedulers
+
+    assert [scheduler.scheduler_type for scheduler in schedulers] == ["cosine", "offset"]
+
 def test_optimizer_parses_without_lr_attribute(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',
@@ -161,7 +182,7 @@ def test_offset_block_parses_as_offset_scheduler(tmp_path: Path) -> None:
         trunk_transformer='<Transformer />',
     ).replace(
         '<Scheduler type="cosine" start_step="0" end_step="100" />',
-        '<Offset min_step="10" max_step="20" />',
+        '<Offset start_step="0" end_step="100" />',
         1,
     )
     path = tmp_path / "offset_scheduler.xml"
@@ -170,8 +191,8 @@ def test_offset_block_parses_as_offset_scheduler(tmp_path: Path) -> None:
     parsed = parse_config(path)
     scheduler = parsed.model.patchers[0].train.optimizer.schedulers[0]
     assert scheduler.scheduler_type == "offset"
-    assert scheduler.attributes["min_step"] == "10"
-    assert scheduler.attributes["max_step"] == "20"
+    assert scheduler.attributes["start_step"] == "0"
+    assert scheduler.attributes["end_step"] == "100"
 
 
 def test_cosine_scheduler_rejects_t_max(tmp_path: Path) -> None:
@@ -191,7 +212,7 @@ def test_cosine_scheduler_rejects_t_max(tmp_path: Path) -> None:
     with pytest.raises(ConfigParseError, match="should not include"):
         parse_config(path)
 
-def test_offset_requires_valid_min_max_range(tmp_path: Path) -> None:
+def test_offset_requires_valid_start_end_range(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',
         patcher_transformer='<Transformer />',
@@ -199,13 +220,13 @@ def test_offset_requires_valid_min_max_range(tmp_path: Path) -> None:
         trunk_transformer='<Transformer />',
     ).replace(
         '<Scheduler type="cosine" start_step="0" end_step="100" />',
-        '<Offset min_step="40" max_step="20" />',
+        '<Offset start_step="40" end_step="20" />',
         1,
     )
     path = tmp_path / "offset_bad_range.xml"
     path.write_text(xml, encoding="utf-8")
 
-    with pytest.raises(ConfigParseError, match="min_step"):
+    with pytest.raises(ConfigParseError, match="start_step"):
         parse_config(path)
 
 
@@ -236,6 +257,8 @@ def test_trunk_child_block_order_accepts_rope_and_pos_embedding(tmp_path: Path) 
     assert trunk.rope_blocks[0].base == 24000.0
     assert trunk.rope_blocks[0].scale == 0.9
     assert trunk.pos_embedding_blocks[0].attributes["type"] == "learned"
+
+
 
 
 
