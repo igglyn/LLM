@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import torch
+
 
 def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     config_path = Path('examples/config.example.xml')
@@ -25,7 +27,7 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
             '--output-dir',
             str(output_dir),
             '--max-steps',
-            '300',
+            '60',
         ],
         check=True,
     )
@@ -34,11 +36,13 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     assert artifact['dataset_file'] == str(distill_dir)
     assert Path(artifact['weights_file']).exists()
     assert artifact['training']['configured_steps'] == 50000
-    assert artifact['training']['steps'] == 300
+    assert artifact['training']['steps'] == 60
     assert artifact['training']['batch_size'] == 16
     assert artifact['training']['save_every'] == 10000
     assert artifact['training']['checkpoint_files'] == []
     assert artifact['training']['used_vocab_embedding'] is False
+    assert artifact['training']['config_d_model'] == 4096
+    assert artifact['training']['config_n_heads'] == 32
     assert artifact['training']['used_positional_embedding'] is True
     assert artifact['training']['token_mapping_file'] == str(distill_dir / 'token_mappings.json')
     assert any(path.endswith('stage_a.jsonl') for path in artifact['training']['data_files'])
@@ -73,7 +77,7 @@ def test_run_uses_trained_artifact(tmp_path: Path) -> None:
             '--output-dir',
             str(output_dir),
             '--max-steps',
-            '300',
+            '60',
         ],
         check=True,
     )
@@ -135,6 +139,37 @@ def test_build_with_vocab_and_pos_embedding_sets_both_flags(tmp_path: Path) -> N
     artifact = json.loads(model_file.read_text(encoding='utf-8'))
     assert artifact['training']['used_vocab_embedding'] is True
     assert artifact['training']['used_positional_embedding'] is True
+
+
+def test_build_preserves_small_configured_d_model_and_n_heads(tmp_path: Path) -> None:
+    config_path = _write_small_dim_config(tmp_path, d_model=384, n_heads=6)
+    distill_dir = _write_distill_dir(tmp_path)
+    output_dir = tmp_path / 'model_small_dims'
+    model_file = output_dir / 'model.json'
+
+    subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--distill-dir',
+            str(distill_dir),
+            '--output-dir',
+            str(output_dir),
+            '--max-steps',
+            '5',
+        ],
+        check=True,
+    )
+
+    artifact = json.loads(model_file.read_text(encoding='utf-8'))
+    payload = torch.load(artifact['weights_file'], map_location='cpu')
+    meta = payload['meta']
+
+    assert (meta['d_model'], meta['n_heads']) == (384, 6)
 
 
 def test_package_writes_manifest_only(tmp_path: Path) -> None:
@@ -262,6 +297,43 @@ def _write_vocab_and_pos_config(tmp_path: Path) -> Path:
       <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
       <VocabEmbedding vocab_size="32000" />
       <PosEmbedding type="learned" />
+      <Transformer layers="1" />
+    </Patcher>
+    <Trunk name="t1" context="128">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <Transformer layers="1" />
+    </Trunk>
+  </Model>
+</Config>
+        """.strip(),
+        encoding='utf-8',
+    )
+    return path
+
+
+def _write_small_dim_config(tmp_path: Path, d_model: int, n_heads: int) -> Path:
+    path = tmp_path / 'small_dims.xml'
+    path.write_text(
+        f"""
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_local">
+        <Source name="local" type="local_text_glob" uri="/tmp/*.txt" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild><Group name="g" percentage="100"><DatasetRef name="set_local" /></Group></MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="t"><Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend></Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="8" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="{d_model}" n_heads="{n_heads}" />
+    <Patcher name="p1" patch_size="64">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
       <Transformer layers="1" />
     </Patcher>
     <Trunk name="t1" context="128">
