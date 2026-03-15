@@ -95,9 +95,9 @@ def _write_config(tmp_path: Path) -> Path:
           <Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend>
         </Teacher>
       </Teachers>
-      <StageA enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></StageA>
-      <StageB enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="256" /></StageB>
-      <StageC enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></StageC>
+      <Stage name="StageA" enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></Stage>
+      <Stage name="StageB" enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="256" /></Stage>
+      <Stage name="StageC" enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></Stage>
     </Distillation>
   </Dataset>
   <Model>

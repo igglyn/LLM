@@ -47,15 +47,15 @@
         </Teacher>
       </Teachers>
 
-      <StageA enabled="true" teacher_ref="teacher_main">
+      <Stage name="StageA" enabled="true" teacher_ref="teacher_main">
         <TopKLogits k="64" temperature="1.0" />
-      </StageA>
-      <StageB enabled="true" teacher_ref="teacher_main">
+      </Stage>
+      <Stage name="StageB" enabled="true" teacher_ref="teacher_main">
         <LongContext max_tokens="16384" packing="true" />
-      </StageB>
-      <StageC enabled="true" teacher_ref="teacher_main">
+      </Stage>
+      <Stage name="StageC" enabled="true" teacher_ref="teacher_main">
         <StructuredOutputs schema="json" strict="true" />
-      </StageC>
+      </Stage>
     </Distillation>
   </Dataset>
 

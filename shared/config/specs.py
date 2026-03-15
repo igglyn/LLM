@@ -103,33 +103,25 @@ class StructuredOutputsSpec:
 
 
 @dataclass(frozen=True)
-class StageASpec:
+class StageSpec:
+    name: str
     enabled: bool
     teacher_ref: str
-    top_k_logits: TopKLogitsSpec
-
-
-@dataclass(frozen=True)
-class StageBSpec:
-    enabled: bool
-    teacher_ref: str
-    long_context: LongContextSpec
-
-
-@dataclass(frozen=True)
-class StageCSpec:
-    enabled: bool
-    teacher_ref: str
-    structured_outputs: StructuredOutputsSpec
+    mode_type: str
+    mode_attributes: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class DistillationSpec:
     attributes: Dict[str, str] = field(default_factory=dict)
     teachers: TeachersSpec = field(default_factory=TeachersSpec)
-    stage_a: StageASpec | None = None
-    stage_b: StageBSpec | None = None
-    stage_c: StageCSpec | None = None
+    stages: List[StageSpec] = field(default_factory=list)
+
+    def stage_by_name(self, stage_name: str) -> StageSpec | None:
+        for stage in self.stages:
+            if stage.name == stage_name:
+                return stage
+        return None
 
 
 @dataclass(frozen=True)
