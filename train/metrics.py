@@ -15,6 +15,7 @@ def _train_summary(config: RuntimeTrainConfig) -> dict[str, Any]:
             "type": config.optimizer_type,
             "weight_decay": config.weight_decay,
             "dropout": config.dropout,
+            "grad_clip": config.grad_clip,
         },
         "schedulers": [
             {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
