@@ -508,8 +508,8 @@ def _is_offset_step(schedulers: list[RuntimeSchedulerConfig], step: int) -> bool
     for scheduler in schedulers:
         if scheduler.scheduler_type != "offset":
             continue
-        start = int(scheduler.attributes.get("min_step", scheduler.attributes.get("start_step", "0")))
-        end = int(scheduler.attributes.get("max_step", scheduler.attributes.get("end_step", "0")))
+        start = int(scheduler.attributes.get("start_step", "0"))
+        end = int(scheduler.attributes.get("end_step", "0"))
         if start <= step < end:
             return True
     return False
