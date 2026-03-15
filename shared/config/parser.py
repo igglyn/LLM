@@ -358,6 +358,7 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
     train_steps = int(_required_attr(elem, "steps"))
     batch_size = int(elem.attrib.get("batch_size", "1"))
     save_every = int(elem.attrib.get("save_every", "0"))
+    device = elem.attrib.get("device", "cpu")
 
     if batch_size <= 0:
         raise ConfigParseError("<Train> attribute 'batch_size' must be positive.")
@@ -391,7 +392,7 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
         grad_clip=(float(optimizer_elem.attrib["grad_clip"]) if "grad_clip" in optimizer_elem.attrib else None),
         schedulers=schedulers,
     )
-    return TrainSpec(steps=train_steps, batch_size=batch_size, save_every=save_every, optimizer=optimizer)
+    return TrainSpec(steps=train_steps, batch_size=batch_size, save_every=save_every, device=device, optimizer=optimizer)
 
 
 def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[SchedulerSpec]) -> None:

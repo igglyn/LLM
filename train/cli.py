@@ -67,6 +67,7 @@ def main() -> None:
                 'save_every': training['save_every'],
                 'checkpoint_files': training['checkpoint_files'],
                 'optimizer_type': training['optimizer_type'],
+                'training_device': training['training_device'],
                 'transformer_layers': training['transformer_layers'],
                 'moe_expert_count': training['moe_expert_count'],
                 'config_d_model': training['config_d_model'],

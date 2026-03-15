@@ -11,6 +11,7 @@ def _train_summary(config: RuntimeTrainConfig) -> dict[str, Any]:
         "steps": config.steps,
         "batch_size": config.batch_size,
         "save_every": config.save_every,
+        "device": config.device,
         "optimizer": {
             "type": config.optimizer_type,
             "weight_decay": config.weight_decay,

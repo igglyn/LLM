@@ -150,6 +150,7 @@ class TrainSpec:
     steps: int
     batch_size: int = 1
     save_every: int = 0
+    device: str = "cpu"
     optimizer: OptimizerSpec = field(default_factory=lambda: OptimizerSpec(optimizer_type="adamw", weight_decay=0.0))
 
 

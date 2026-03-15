@@ -39,6 +39,7 @@ def test_build_trains_and_summary_reads_artifact(tmp_path: Path) -> None:
     assert artifact['training']['steps'] == 20
     assert artifact['training']['batch_size'] == 2
     assert artifact['training']['save_every'] == 10
+    assert artifact['training']['training_device'] == 'cpu'
     assert len(artifact['training']['checkpoint_files']) == 2
     assert artifact['training']['used_vocab_embedding'] is False
     assert artifact['training']['config_d_model'] == 128
@@ -416,6 +417,47 @@ def _write_vocab_and_pos_config(tmp_path: Path) -> Path:
     )
     return path
 
+
+
+
+def _write_invalid_trunk_vocab_config(tmp_path: Path) -> Path:
+    config = """
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="source">
+        <Source name="jsonl_source" type="jsonl" uri="local://dummy" />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild>
+      <Group name="g" percentage="100">
+        <DatasetRef name="source" />
+      </Group>
+    </MixtureBuild>
+    <Distillation max_tokens="64">
+      <Teachers>
+        <Teacher name="t"><Backend type="dummy_local"><ModelRef name_or_path="dummy" /><Execution device="cpu" precision="fp32" /></Backend></Teacher>
+      </Teachers>
+      <Stage name="a" enabled="true" teacher_ref="t"><TopKLogits k="4" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="128" n_heads="8" />
+    <Patcher name="p1" patch_size="128">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <Transformer />
+    </Patcher>
+    <Trunk name="t1" context="1024">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <VocabEmbedding vocab_size="1024" />
+      <Transformer />
+    </Trunk>
+  </Model>
+</Config>
+"""
+    config_path = tmp_path / 'config_invalid_trunk_vocab.xml'
+    config_path.write_text(config, encoding='utf-8')
+    return config_path
 
 def _write_small_dim_config(tmp_path: Path, d_model: int, n_heads: int) -> Path:
     path = tmp_path / 'small_dims.xml'
