@@ -33,6 +33,12 @@ class TopKPrediction:
 
 
 @dataclass(frozen=True)
+class TokenMappingRow:
+    token: str
+    mapped_id: int
+
+
+@dataclass(frozen=True)
 class StageAOutputRow:
     record_id: str
     doc_id: str

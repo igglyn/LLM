@@ -15,20 +15,21 @@ def test_canonical_config_smoke_through_both_apps(tmp_path: Path) -> None:
 
     extracted = tmp_path / "extracted"
     mixed = tmp_path / "mixed.jsonl"
-    stage_a = tmp_path / "stage_a.jsonl"
+    stage_a_dir = tmp_path / "stage_a"
 
     _run([sys.executable, "-m", "distill", "extract", "--config", str(config_path), "--output-dir", str(extracted)])
     _run([sys.executable, "-m", "distill", "mix", "--config", str(config_path), "--input", str(extracted), "--output", str(mixed)])
-    _run([sys.executable, "-m", "distill", "stage-a", "--config", str(config_path), "--input", str(mixed), "--output", str(stage_a)])
+    _run([sys.executable, "-m", "distill", "stage-a", "--config", str(config_path), "--input", str(mixed), "--output", str(stage_a_dir)])
 
     _dir = tmp_path / "model_out"
     model_file = _dir / "model.json"
 
-    _run([sys.executable, "-m", "train", "build", "--config", str(config_path), "--dataset-file", str(stage_a), "--output-dir", str(_dir)])
+    _run([sys.executable, "-m", "train", "build", "--config", str(config_path), "--dataset-file", str(stage_a_dir / "stage_a.jsonl"), "--output-dir", str(_dir), "--token-mapping-file", str(stage_a_dir / "token_mapping.jsonl")])
     _run([sys.executable, "-m", "train", "summary", "--model-file", str(model_file)])
     _run([sys.executable, "-m", "train", "smoke", "--config", str(config_path), "--text", "hello app smoke"])
 
-    assert stage_a.exists()
+    assert (stage_a_dir / "stage_a.jsonl").exists()
+    assert (stage_a_dir / "token_mapping.jsonl").exists()
     assert model_file.exists()
 
 

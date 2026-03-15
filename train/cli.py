@@ -15,6 +15,7 @@ def main() -> None:
     build_parser.add_argument('--config', required=True, help='Path to XML config')
     build_parser.add_argument('--dataset-file', required=True, help='Path to prepared dataset file')
     build_parser.add_argument('--output-dir', required=True, help='Directory where trained model artifacts are written')
+    build_parser.add_argument('--token-mapping-file', required=True, help='Path to StageA token_mapping.jsonl file')
 
     package_parser = subparsers.add_parser('package')
     package_parser.add_argument('--config', required=True, help='Path to XML config')
@@ -37,7 +38,12 @@ def main() -> None:
 
     if args.command == 'build':
         model_runtime = load_model_runtime(args.config)
-        training = train_model(model_runtime=model_runtime, dataset_file=args.dataset_file, output_dir=args.output_dir)
+        training = train_model(
+            model_runtime=model_runtime,
+            dataset_file=args.dataset_file,
+            output_dir=args.output_dir,
+            token_mapping_file=args.token_mapping_file,
+        )
         model_file = write_training_artifact(
             model_runtime=model_runtime,
             dataset_file=args.dataset_file,

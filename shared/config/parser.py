@@ -24,6 +24,7 @@ from .specs import (
     OptimizerSpec,
     PatcherSpec,
     PosEmbeddingBlockSpec,
+    VocabEmbeddingBlockSpec,
     RoPEBlockSpec,
     SchedulerSpec,
     SourceExtractionSpec,
@@ -189,6 +190,7 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
 
     rope_blocks: List[RoPEBlockSpec] = []
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = []
+    vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = []
     transformer_blocks: List[TransformerBlockSpec] = []
     block_order: List[str] = []
 
@@ -209,6 +211,11 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
         elif child.tag == "PosEmbedding":
             pos_embedding_blocks.append(PosEmbeddingBlockSpec(attributes=dict(child.attrib)))
             block_order.append("PosEmbedding")
+        elif child.tag == "VocabEmbedding":
+            vocab_embedding_blocks.append(
+                VocabEmbeddingBlockSpec(vocab_size=int(_required_attr(child, "vocab_size")), attributes=dict(child.attrib))
+            )
+            block_order.append("VocabEmbedding")
         elif child.tag == "Transformer":
             transformer_blocks.append(
                 TransformerBlockSpec(
@@ -229,6 +236,7 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
         train=train,
         rope_blocks=rope_blocks,
         pos_embedding_blocks=pos_embedding_blocks,
+        vocab_embedding_blocks=vocab_embedding_blocks,
         transformer_blocks=transformer_blocks,
         block_order=block_order,
     )
@@ -239,6 +247,7 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
 
     rope_blocks: List[RoPEBlockSpec] = []
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = []
+    vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = []
     drope_blocks: List[DRopeBlockSpec] = []
     transformer_blocks: List[TransformerBlockSpec] = []
     moe_blocks: List[MixOfExpertsSpec] = []
@@ -261,6 +270,11 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
         elif child.tag == "PosEmbedding":
             pos_embedding_blocks.append(PosEmbeddingBlockSpec(attributes=dict(child.attrib)))
             block_order.append("PosEmbedding")
+        elif child.tag == "VocabEmbedding":
+            vocab_embedding_blocks.append(
+                VocabEmbeddingBlockSpec(vocab_size=int(_required_attr(child, "vocab_size")), attributes=dict(child.attrib))
+            )
+            block_order.append("VocabEmbedding")
         elif child.tag == "DRope":
             drope_blocks.append(
                 DRopeBlockSpec(
@@ -295,6 +309,7 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
         train=train,
         rope_blocks=rope_blocks,
         pos_embedding_blocks=pos_embedding_blocks,
+        vocab_embedding_blocks=vocab_embedding_blocks,
         drope_blocks=drope_blocks,
         transformer_blocks=transformer_blocks,
         mix_of_experts_blocks=moe_blocks,

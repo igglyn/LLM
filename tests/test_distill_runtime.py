@@ -134,14 +134,18 @@ def test_stage_a_end_to_end_smoke_with_dummy_teacher(tmp_path: Path) -> None:
 
     extracted_path = tmp_path / "extracted"
     mixed_path = tmp_path / "mixed.jsonl"
-    stage_a_path = tmp_path / "stage_a.jsonl"
+    stage_a_dir = tmp_path / "stage_a"
 
     assert run_extract(config_path, extracted_path) == 1
     assert run_mix(config_path, extracted_path, mixed_path) == 1
-    assert run_stage_a_command(config_path, mixed_path, stage_a_path) == 1
+    assert run_stage_a_command(config_path, mixed_path, stage_a_dir) == 1
 
-    row = read_jsonl(stage_a_path)[0]
+    row = read_jsonl(stage_a_dir / "stage_a.jsonl")[0]
+    mapping_rows = read_jsonl(stage_a_dir / "token_mapping.jsonl")
+
     assert {"record_id", "doc_id", "prompt_text", "target_text", "top_k_predictions", "metadata"} <= set(row)
+    assert mapping_rows
+    assert {"token", "mapped_id"} <= set(mapping_rows[0])
 
 
 
@@ -260,17 +264,21 @@ def test_jsonl_schema_validation(tmp_path: Path) -> None:
     config_path = tmp_path / "config.xml"
     config_path.write_text(_runtime_config_xml(str(docs_dir / "*.txt"), min_bytes="1"), encoding="utf-8")
 
-    output_path = tmp_path / "stage_a.jsonl"
+    output_dir = tmp_path / "stage_a_output"
     completed = subprocess.run(
-        [sys.executable, "-m", "distill", "stage-a", "--config", str(config_path), "--output", str(output_path)],
+        [sys.executable, "-m", "distill", "stage-a", "--config", str(config_path), "--output", str(output_dir)],
         check=True,
         capture_output=True,
         text=True,
     )
     assert "stage-a completed" in completed.stdout
 
-    with output_path.open("r", encoding="utf-8") as handle:
+    with (output_dir / "stage_a.jsonl").open("r", encoding="utf-8") as handle:
         row = json.loads(handle.readline())
+
+    token_mapping_rows = read_jsonl(output_dir / "token_mapping.jsonl")
+    assert token_mapping_rows
+    assert {"token", "mapped_id"} <= set(token_mapping_rows[0])
 
     assert isinstance(row["record_id"], str)
     assert isinstance(row["doc_id"], str)
