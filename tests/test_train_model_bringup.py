@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from shared.config import parse_config, resolve_config
 from train.blocks import MixOfExpertsBlock
 from train.builder import build_model_runtime
@@ -65,8 +67,11 @@ def test_mix_of_experts_build(tmp_path: Path) -> None:
 def test_smoke_forward_dummy(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path)
     out = runtime.forward_dummy(batch_size=2, seq_len=4, d_model=1024)
+    initial = torch.arange(2 * 4 * 1024, dtype=torch.float32).reshape(2, 4, 1024)
 
     assert out.tensor_shape == (2, 4, 1024)
+    assert out.tensor is not None
+    assert not torch.allclose(out.tensor, initial)
     assert "TrunkEnd(t1)" in out.execution_trace
     assert out.moe_metrics["moe1"]["route_calls"] == 1
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import torch
+
 from train.specs import ExpertRuntime, RuntimeState
 
 
@@ -40,5 +42,18 @@ class MixOfExpertsBlock:
             execution_trace=[*state.execution_trace, f"MoERoute({self.name}->{selected.name})"],
             moe_metrics=metrics,
             tensor_shape=state.tensor_shape,
+            tensor=state.tensor,
         )
-        return selected.run(routed)
+        out = selected.run(routed)
+        tensor = out.tensor
+        if tensor is not None:
+            gate_boost = 1.0 + (route_index / max(1, len(self.experts)))
+            tensor = tensor * torch.tensor(gate_boost, dtype=tensor.dtype, device=tensor.device)
+            return RuntimeState(
+                text=out.text,
+                execution_trace=out.execution_trace,
+                moe_metrics=dict(out.moe_metrics),
+                tensor_shape=tuple(tensor.shape),
+                tensor=tensor,
+            )
+        return out
