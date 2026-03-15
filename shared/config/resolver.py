@@ -142,6 +142,7 @@ def _resolve_transformer_block(
 
     if d_model is None or n_heads is None:
         raise ConfigResolutionError(f"{context} has <Transformer> missing d_model or n_heads after resolution.")
+    _validate_heads(context=context, d_model=d_model, n_heads=n_heads)
 
     return ResolvedTransformerBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
 
@@ -151,6 +152,7 @@ def _resolve_rope_block(raw_block: RoPEBlockSpec, container_defaults: DefaultsSp
     n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
     if d_model is None or n_heads is None:
         raise ConfigResolutionError("RoPE block missing d_model or n_heads after resolution.")
+    _validate_heads(context="RoPE block", d_model=d_model, n_heads=n_heads)
     return ResolvedRoPEBlockSpec(
         d_model=d_model,
         n_heads=n_heads,
@@ -165,6 +167,7 @@ def _resolve_drope_block(raw_block: DRopeBlockSpec, container_defaults: Defaults
     n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
     if d_model is None or n_heads is None:
         raise ConfigResolutionError("DRope block missing d_model or n_heads after resolution.")
+    _validate_heads(context="DRope block", d_model=d_model, n_heads=n_heads)
     return ResolvedDRopeBlockSpec(
         d_model=d_model,
         n_heads=n_heads,
@@ -180,3 +183,12 @@ def _merged_defaults(base_defaults: DefaultsSpec, d_model: int | None, n_heads: 
         d_model=base_defaults.d_model if d_model is None else d_model,
         n_heads=base_defaults.n_heads if n_heads is None else n_heads,
     )
+
+
+def _validate_heads(context: str, d_model: int, n_heads: int) -> None:
+    if d_model <= 0 or n_heads <= 0:
+        raise ConfigResolutionError(f"{context} must have positive d_model and n_heads (got d_model={d_model}, n_heads={n_heads}).")
+    if d_model % n_heads != 0:
+        raise ConfigResolutionError(
+            f"{context} requires d_model divisible by n_heads (got d_model={d_model}, n_heads={n_heads})."
+        )

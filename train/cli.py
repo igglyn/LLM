@@ -4,7 +4,7 @@ import argparse
 import json
 
 from train.artifacts import read_model_artifact, write_build_artifact, write_training_artifact
-from train.runtime import load_model_runtime, run_smoke, run_trained_model, train_model
+from train.runtime import generate_tokens, load_model_runtime, run_smoke, run_trained_model, train_model
 
 
 def main() -> None:
@@ -27,6 +27,7 @@ def main() -> None:
     run_parser.add_argument('--config', required=True, help='Path to XML config')
     run_parser.add_argument('--model-file', required=True, help='Path to trained model artifact containing weights_file')
     run_parser.add_argument('--text', default='hello train runtime', help='Text payload for runtime routing context')
+    run_parser.add_argument('--max-new-tokens', type=int, default=1, help='Number of autoregressive tokens to generate')
 
     summary_parser = subparsers.add_parser('summary')
     summary_parser.add_argument('--model-file', required=True, help='Path to a built model artifact')
@@ -58,6 +59,7 @@ def main() -> None:
                 'dataset_examples': training['dataset_examples'],
                 'data_files': training['data_files'],
                 'token_mapping_file': training['token_mapping_file'],
+                'used_vocab_embedding': training['used_vocab_embedding'],
                 'used_positional_embedding': training['used_positional_embedding'],
                 'initial_loss': training['initial_loss'],
                 'final_loss': training['final_loss'],
@@ -84,6 +86,12 @@ def main() -> None:
         if not isinstance(weights_file, str):
             raise ValueError('model artifact does not contain a weights_file. Use `train build` output.')
         result = run_trained_model(model_runtime=model_runtime, weights_file=weights_file, text=args.text)
+        result['generation'] = generate_tokens(
+            model_runtime=model_runtime,
+            weights_file=weights_file,
+            text=args.text,
+            max_new_tokens=max(0, args.max_new_tokens),
+        )
         print(json.dumps(result, indent=2))
     elif args.command == 'summary':
         model_artifact = read_model_artifact(args.model_file)
