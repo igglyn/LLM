@@ -144,7 +144,13 @@ def _resolve_rope_block(raw_block: RoPEBlockSpec, container_defaults: DefaultsSp
     n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
     if d_model is None or n_heads is None:
         raise ConfigResolutionError("RoPE block missing d_model or n_heads after resolution.")
-    return ResolvedRoPEBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
+    return ResolvedRoPEBlockSpec(
+        d_model=d_model,
+        n_heads=n_heads,
+        base=10000.0 if raw_block.base is None else raw_block.base,
+        scale=1.0 if raw_block.scale is None else raw_block.scale,
+        attributes=dict(raw_block.attributes),
+    )
 
 
 def _resolve_drope_block(raw_block: DRopeBlockSpec, container_defaults: DefaultsSpec) -> ResolvedDRopeBlockSpec:
@@ -152,7 +158,13 @@ def _resolve_drope_block(raw_block: DRopeBlockSpec, container_defaults: Defaults
     n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
     if d_model is None or n_heads is None:
         raise ConfigResolutionError("DRope block missing d_model or n_heads after resolution.")
-    return ResolvedDRopeBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
+    return ResolvedDRopeBlockSpec(
+        d_model=d_model,
+        n_heads=n_heads,
+        base=10000.0 if raw_block.base is None else raw_block.base,
+        scale=1.0 if raw_block.scale is None else raw_block.scale,
+        attributes=dict(raw_block.attributes),
+    )
 
 
 def _merged_defaults(base_defaults: DefaultsSpec, d_model: int | None, n_heads: int | None) -> DefaultsSpec:

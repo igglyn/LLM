@@ -19,6 +19,10 @@ def test_resolved_defaults_and_overrides(tmp_path: Path) -> None:
     assert patcher.transformer_blocks[1].n_heads == 12
     assert patcher.rope_blocks[0].d_model == 2048
     assert patcher.rope_blocks[0].n_heads == 16
+    assert patcher.rope_blocks[0].base == 16000.0
+    assert patcher.rope_blocks[0].scale == 0.5
+    assert resolved.model.trunk.drope_blocks[0].base == 8000.0
+    assert resolved.model.trunk.drope_blocks[0].scale == 1.25
 
 
 def test_patcher_forward_order(tmp_path: Path) -> None:
@@ -27,7 +31,7 @@ def test_patcher_forward_order(tmp_path: Path) -> None:
     patcher_trace = [t for t in trace if t.startswith(("Patcher", "RoPE", "Transformer", "PosEmbedding"))]
     assert patcher_trace[:5] == [
         "PatcherStart(p1)",
-        "RoPE(d_model=2048,n_heads=16)",
+        "RoPE(d_model=2048,n_heads=16,base=16000.0,scale=0.5)",
         "Transformer(d_model=1024,n_heads=8)",
         "PosEmbedding",
         "Transformer(d_model=1536,n_heads=12)",
@@ -40,7 +44,7 @@ def test_trunk_forward_order(tmp_path: Path) -> None:
     trunk_start = trace.index("TrunkStart(t1)")
     assert trace[trunk_start : trunk_start + 3] == [
         "TrunkStart(t1)",
-        "DRope(d_model=1024,n_heads=8)",
+        "DRope(d_model=1024,n_heads=8,base=8000.0,scale=1.25)",
         "MoERoute(moe1->expert_b)",
     ]
 
@@ -110,14 +114,14 @@ def _write_config(tmp_path: Path) -> Path:
           <Scheduler type="loss_threshold" threshold="1.0" />
         </Optimizer>
       </Train>
-      <RoPE />
+      <RoPE base="16000" scale="0.5" />
       <Transformer d_model="1024" n_heads="8" />
       <PosEmbedding type="learned" />
       <Transformer d_model="1536" n_heads="12" />
     </Patcher>
     <Trunk name="t1" context="2048">
       <Train mode="full"><Optimizer type="adamw" lr="0.0001" weight_decay="0.1" /></Train>
-      <DRope />
+      <DRope base="8000" scale="1.25" />
       <MixOfExperts name="moe1">
         <Expert name="expert_a"><Transformer /></Expert>
         <Expert name="expert_b"><Transformer d_model="1152" n_heads="9" /></Expert>
