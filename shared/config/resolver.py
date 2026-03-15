@@ -70,6 +70,7 @@ def _resolve_patcher(raw_patcher: PatcherSpec, model_defaults: DefaultsSpec) -> 
         train=raw_patcher.train,
         rope_blocks=resolved_ropes,
         pos_embedding_blocks=raw_patcher.pos_embedding_blocks,
+        vocab_embedding_blocks=raw_patcher.vocab_embedding_blocks,
         transformer_blocks=resolved_transformers,
         block_order=list(raw_patcher.block_order),
     )
@@ -101,6 +102,7 @@ def _resolve_trunk(raw_trunk: TrunkSpec, model_defaults: DefaultsSpec) -> Resolv
         train=raw_trunk.train,
         rope_blocks=resolved_ropes,
         pos_embedding_blocks=raw_trunk.pos_embedding_blocks,
+        vocab_embedding_blocks=raw_trunk.vocab_embedding_blocks,
         drope_blocks=resolved_dropes,
         transformer_blocks=resolved_transformers,
         mix_of_experts_blocks=resolved_moes,

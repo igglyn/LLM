@@ -52,7 +52,7 @@ Boundary rule:
 # distill
 python -m distill extract --config examples/config.example.xml --output-dir /tmp/extracted
 python -m distill mix --config examples/config.example.xml --input /tmp/extracted --output /tmp/mixed.jsonl
-python -m distill stage-a --config examples/config.example.xml --input /tmp/mixed.jsonl --output /tmp/stage_a.jsonl
+python -m distill stage-a --config examples/config.example.xml --input /tmp/mixed.jsonl --output /tmp/stage_a
 
 # train
 python -m train build --config examples/config.example.xml --distill-dir /tmp/distill --output-dir /tmp/model
@@ -80,7 +80,7 @@ Example commands:
 # distill with Hugging Face dataset + model backend
 python -m distill extract --config examples/config.hf.example.xml --output-dir /tmp/hf_extracted
 python -m distill mix --config examples/config.hf.example.xml --input /tmp/hf_extracted --output /tmp/hf_mixed.jsonl
-python -m distill stage-a --config examples/config.hf.example.xml --input /tmp/hf_mixed.jsonl --output /tmp/hf_stage_a.jsonl
+python -m distill stage-a --config examples/config.hf.example.xml --input /tmp/hf_mixed.jsonl --output /tmp/hf_stage_a
 
 # train runtime bring-up on the same config
 python -m train build --config examples/config.hf.example.xml --distill-dir /tmp/hf_distill --output-dir /tmp/hf_model
@@ -90,6 +90,8 @@ python -m train run --config examples/config.hf.example.xml --model-file /tmp/hf
 python -m train summary --model-file /tmp/hf_model/model.json
 python -m train smoke --config examples/config.hf.example.xml
 ```
+
+The same StageA output directory convention applies (`stage_a.jsonl` + `token_mapping.jsonl`).
 
 ## Extension hooks
 

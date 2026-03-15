@@ -175,6 +175,12 @@ class PosEmbeddingBlockSpec:
 
 
 @dataclass(frozen=True)
+class VocabEmbeddingBlockSpec:
+    vocab_size: int
+    attributes: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TransformerBlockSpec:
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
@@ -205,6 +211,7 @@ class PatcherSpec:
     train: TrainSpec | None = None
     rope_blocks: List[RoPEBlockSpec] = field(default_factory=list)
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
+    vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
@@ -218,6 +225,7 @@ class TrunkSpec:
     train: TrainSpec | None = None
     rope_blocks: List[RoPEBlockSpec] = field(default_factory=list)
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
+    vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     drope_blocks: List[DRopeBlockSpec] = field(default_factory=list)
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
     mix_of_experts_blocks: List[MixOfExpertsSpec] = field(default_factory=list)
@@ -292,6 +300,7 @@ class ResolvedPatcherSpec:
     train: TrainSpec
     rope_blocks: List[ResolvedRoPEBlockSpec] = field(default_factory=list)
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
+    vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
@@ -303,6 +312,7 @@ class ResolvedTrunkSpec:
     train: TrainSpec
     rope_blocks: List[ResolvedRoPEBlockSpec] = field(default_factory=list)
     pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
+    vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     drope_blocks: List[ResolvedDRopeBlockSpec] = field(default_factory=list)
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
     mix_of_experts_blocks: List[ResolvedMixOfExpertsSpec] = field(default_factory=list)

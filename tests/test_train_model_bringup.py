@@ -76,6 +76,49 @@ def test_smoke_forward_dummy(tmp_path: Path) -> None:
     assert out.moe_metrics["moe1"]["route_calls"] == 1
 
 
+
+
+def test_vocab_embedding_runtime_trace(tmp_path: Path) -> None:
+    path = tmp_path / "vocab_runtime.xml"
+    path.write_text(
+        """
+<Config>
+  <Dataset>
+    <SourceExtraction />
+    <MixtureBuild />
+    <Distillation>
+      <Teachers>
+        <Teacher name="t">
+          <Backend type="x"><ModelRef name_or_path="m" /><Execution device="cpu" precision="fp32" /></Backend>
+        </Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="16" /></Stage>
+      <Stage name="StageB" enabled="false" teacher_ref="t"><LongContext max_tokens="256" /></Stage>
+      <Stage name="StageC" enabled="false" teacher_ref="t"><StructuredOutputs schema="json" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="128" n_heads="8" />
+    <Patcher name="p1" patch_size="64">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <VocabEmbedding vocab_size="50000" />
+      <Transformer />
+    </Patcher>
+    <Trunk name="t1" context="128">
+      <Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train>
+      <Transformer />
+    </Trunk>
+  </Model>
+</Config>
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    runtime = build_model_runtime(resolve_config(parse_config(path)))
+    trace = runtime.smoke("hello").execution_trace
+
+    assert "VocabEmbedding(vocab_size=50000)" in trace
+
 def test_scheduler_ordering_preserved_and_summarized(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path)
     summary = summarize_model_runtime(runtime)

@@ -198,6 +198,38 @@ def test_trunk_child_block_order_accepts_rope_and_pos_embedding(tmp_path: Path) 
     assert trunk.rope_blocks[0].scale == 0.9
     assert trunk.pos_embedding_blocks[0].attributes["type"] == "learned"
 
+
+
+def test_vocab_embedding_parses_and_preserves_order(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<VocabEmbedding vocab_size="32000" /><Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    )
+    path = tmp_path / "vocab_embedding.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    config = parse_config(path)
+    patcher = config.model.patchers[0]
+
+    assert patcher.block_order == ["VocabEmbedding", "Transformer"]
+    assert patcher.vocab_embedding_blocks[0].vocab_size == 32000
+
+
+def test_vocab_embedding_requires_vocab_size(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<VocabEmbedding /><Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    )
+    path = tmp_path / "vocab_embedding_missing_vocab_size.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ConfigParseError, match="vocab_size"):
+        parse_config(path)
+
 def test_model_level_defaults_resolve_for_transformer() -> None:
     config = parse_config(EXAMPLE_CONFIG_PATH)
     resolved = resolve_config(config)

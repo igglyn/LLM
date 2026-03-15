@@ -60,7 +60,7 @@ def main() -> None:
     if args.command == "stage-a":
         if args.input:
             count = run_stage_a_command(args.config, args.input, args.output)
-            print(f"stage-a completed: rows={count}, output={args.output}")
+            print(f"stage-a completed: rows={count}, output_dir={args.output}")
             return
 
         with tempfile.TemporaryDirectory(prefix="distill-stage-a-") as tmp_dir:
@@ -70,7 +70,7 @@ def main() -> None:
             run_extract(args.config, extracted)
             run_mix(args.config, extracted, mixed)
             count = run_stage_a_command(args.config, mixed, args.output)
-        print(f"stage-a completed: rows={count}, output={args.output}")
+        print(f"stage-a completed: rows={count}, output_dir={args.output}")
         return
 
 
