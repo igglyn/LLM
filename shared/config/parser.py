@@ -414,6 +414,7 @@ def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[Schedul
                 raise ConfigParseError(
                     f"<Offset> end_step={end_step} exceeds <Train steps=\"{train_steps}\">."
                 )
+            intervals.append((start_step, end_step, scheduler_type))
             continue
 
         start_raw = scheduler.attributes.get("start_step")
