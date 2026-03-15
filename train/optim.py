@@ -15,5 +15,6 @@ def runtime_train_config_from_spec(train_spec: TrainSpec) -> RuntimeTrainConfig:
         save_every=train_spec.save_every,
         optimizer_type=train_spec.optimizer.optimizer_type,
         weight_decay=train_spec.optimizer.weight_decay,
+        dropout=train_spec.optimizer.dropout,
         schedulers=schedulers,
     )

@@ -40,6 +40,7 @@ def test_summary_smoke_path_exposes_train_fields() -> None:
     smoke_state = runtime.smoke("summary smoke")
 
     assert summary["patchers"][0]["train"]["optimizer"]["type"] == "adamw"
+    assert summary["patchers"][0]["train"]["optimizer"]["dropout"] == 0.0
     assert summary["patchers"][0]["train"]["batch_size"] == 8
     assert summary["patchers"][0]["train"]["save_every"] == 5000
     assert len(summary["patchers"][0]["train"]["schedulers"]) == 3
