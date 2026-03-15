@@ -61,7 +61,7 @@ def _build_runtime(config_path: Path):
 
 
 def test_offset_scheduler_marks_skip_range() -> None:
-    schedulers = [RuntimeSchedulerConfig(scheduler_type="offset", attributes={"min_step": "2", "max_step": "5"})]
+    schedulers = [RuntimeSchedulerConfig(scheduler_type="offset", attributes={"start_step": "2", "end_step": "5"})]
 
     assert _is_offset_step(schedulers, step=1) is False
     assert _is_offset_step(schedulers, step=2) is True
