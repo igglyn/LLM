@@ -95,15 +95,18 @@ def train_model(
         for param_group in optimizer.param_groups:
             param_group["lr"] = current_lr
 
-        predicted_latents = model.forward_latents(input_ids)
-        with torch.no_grad():
-            target_latents = model.encode_target_latents(target_ids)
-        loss = _masked_latent_mse(
-            predicted_latents=predicted_latents,
-            target_latents=target_latents,
+        next_token_logits = model(input_ids)
+        patcher_reconstruction_loss = _masked_token_cross_entropy(
+            logits=next_token_logits,
+            target_ids=input_ids,
+            pad_id=token_to_id["<pad>"],
+        )
+        next_token_loss = _masked_token_cross_entropy(
+            logits=next_token_logits,
             target_ids=target_ids,
             pad_id=token_to_id["<pad>"],
         )
+        loss = patcher_reconstruction_loss + next_token_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -155,7 +158,7 @@ def train_model(
                     {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
                     for scheduler in model_runtime.trunk.train_config.schedulers
                 ],
-                "prediction_target": "latent_state",
+                "prediction_target": "input_reconstruction_plus_next_token",
                 "latent_dim": model.latent_dim,
                 "decoder_head": "token_logits_for_inference",
             },
@@ -302,13 +305,13 @@ class _TrainLanguageModel(nn.Module):
             x = x + self.positional_embedding(positions)
         return x
 
-    def encode_target_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.latent_head(self.encode_tokens(input_ids))
-
     def forward_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
-        x = self.encode_tokens(input_ids)
-        seq_len = input_ids.shape[1]
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool), diagonal=1)
+        return self.forward_latents_from_encoded(self.encode_tokens(input_ids))
+
+    def forward_latents_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
+        x = encoded_inputs
+        seq_len = encoded_inputs.shape[1]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=encoded_inputs.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
             x = layer(x, causal_mask)
         x = self.norm(x)
@@ -317,8 +320,17 @@ class _TrainLanguageModel(nn.Module):
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         return self.head(self.latent_to_model(latents))
 
+    def reconstruct_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.reconstruct_logits_from_encoded(self.encode_tokens(input_ids))
+
+    def reconstruct_logits_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
+        return self.decode_latents(self.latent_head(encoded_inputs))
+
+    def forward_logits_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
+        return self.decode_latents(self.forward_latents_from_encoded(encoded_inputs))
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.decode_latents(self.forward_latents(input_ids))
+        return self.forward_logits_from_encoded(self.encode_tokens(input_ids))
 
 
 class _TransformerDecoderBlock(nn.Module):
@@ -354,17 +366,13 @@ class _TransformerDecoderBlock(nn.Module):
         return x + ffn_out
 
 
-def _masked_latent_mse(
-    predicted_latents: torch.Tensor,
-    target_latents: torch.Tensor,
-    target_ids: torch.Tensor,
-    pad_id: int,
-) -> torch.Tensor:
-    mask = (target_ids != pad_id).unsqueeze(-1).to(predicted_latents.dtype)
-    squared_error = (predicted_latents - target_latents) ** 2
-    masked_error = squared_error * mask
-    denom = torch.clamp(mask.sum() * predicted_latents.shape[-1], min=1.0)
-    return masked_error.sum() / denom
+def _masked_token_cross_entropy(logits: torch.Tensor, target_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
+    vocab_size = logits.shape[-1]
+    return torch.nn.functional.cross_entropy(
+        logits.reshape(-1, vocab_size),
+        target_ids.reshape(-1),
+        ignore_index=pad_id,
+    )
 
 
 def _build_optimizer(optimizer_type: str, parameters: Any, weight_decay: float) -> torch.optim.Optimizer:
