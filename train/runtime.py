@@ -132,27 +132,36 @@ def train_model(
         for param_group in patcher_optimizer.param_groups:
             param_group["lr"] = patcher_lr
 
-        patcher_logits = patcher_model.reconstruct_logits(patcher_input_ids)
-        patcher_loss = _masked_token_cross_entropy(
-            logits=patcher_logits,
-            target_ids=patcher_input_ids,
-            pad_id=token_to_id["<pad>"],
-        )
-        patcher_optimizer.zero_grad()
-        patcher_loss.backward()
-        patcher_optimizer.step()
+        patcher_skip_step = _is_offset_step(patcher_train_config.schedulers, step)
+        trunk_skip_step = _is_offset_step(model_runtime.trunk.train_config.schedulers, step)
 
-        next_token_logits = trunk_model(trunk_input_ids)
-        next_token_loss = _masked_token_cross_entropy(
-            logits=next_token_logits,
-            target_ids=target_ids,
-            pad_id=token_to_id["<pad>"],
-        )
+        if patcher_skip_step:
+            patcher_loss = torch.tensor(0.0)
+        else:
+            patcher_logits = patcher_model.reconstruct_logits(patcher_input_ids)
+            patcher_loss = _masked_token_cross_entropy(
+                logits=patcher_logits,
+                target_ids=patcher_input_ids,
+                pad_id=token_to_id["<pad>"],
+            )
+            patcher_optimizer.zero_grad()
+            patcher_loss.backward()
+            patcher_optimizer.step()
+
+        if trunk_skip_step:
+            next_token_loss = torch.tensor(0.0)
+        else:
+            next_token_logits = trunk_model(trunk_input_ids)
+            next_token_loss = _masked_token_cross_entropy(
+                logits=next_token_logits,
+                target_ids=target_ids,
+                pad_id=token_to_id["<pad>"],
+            )
+            trunk_optimizer.zero_grad()
+            next_token_loss.backward()
+            trunk_optimizer.step()
+
         loss = patcher_loss + next_token_loss
-
-        trunk_optimizer.zero_grad()
-        next_token_loss.backward()
-        trunk_optimizer.step()
 
         detached_loss = float(loss.detach().cpu())
         detached_trunk_loss = float(next_token_loss.detach().cpu())
@@ -475,6 +484,17 @@ def _build_schedule_fn(schedulers: list[RuntimeSchedulerConfig], total_steps: in
 
     return _lr
 
+
+
+def _is_offset_step(schedulers: list[RuntimeSchedulerConfig], step: int) -> bool:
+    for scheduler in schedulers:
+        if scheduler.scheduler_type != "offset":
+            continue
+        start = int(scheduler.attributes.get("min_step", scheduler.attributes.get("start_step", "0")))
+        end = int(scheduler.attributes.get("max_step", scheduler.attributes.get("end_step", "0")))
+        if start <= step < end:
+            return True
+    return False
 
 def _resume_training_state(
     trunk_model: nn.Module,

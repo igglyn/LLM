@@ -364,10 +364,24 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
     if save_every < 0:
         raise ConfigParseError("<Train> attribute 'save_every' must be >= 0.")
 
-    schedulers = [
-        SchedulerSpec(scheduler_type=_required_attr(scheduler_elem, "type"), attributes=dict(scheduler_elem.attrib))
-        for scheduler_elem in optimizer_elem.findall("Scheduler")
-    ]
+    schedulers: list[SchedulerSpec] = []
+    for optimizer_child in list(optimizer_elem):
+        if optimizer_child.tag == "Scheduler":
+            schedulers.append(
+                SchedulerSpec(
+                    scheduler_type=_required_attr(optimizer_child, "type"),
+                    attributes=dict(optimizer_child.attrib),
+                )
+            )
+            continue
+        if optimizer_child.tag == "Offset":
+            min_step = _required_attr(optimizer_child, "min_step")
+            max_step = _required_attr(optimizer_child, "max_step")
+            attributes = dict(optimizer_child.attrib)
+            attributes.setdefault("start_step", min_step)
+            attributes.setdefault("end_step", max_step)
+            schedulers.append(SchedulerSpec(scheduler_type="offset", attributes=attributes))
+
     _validate_scheduler_step_coverage(train_steps, schedulers)
 
     optimizer = OptimizerSpec(
@@ -387,6 +401,21 @@ def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[Schedul
     intervals: list[tuple[int, int, str]] = []
     for scheduler in schedulers:
         scheduler_type = scheduler.scheduler_type
+        if scheduler_type == "offset":
+            min_raw = scheduler.attributes.get("min_step", scheduler.attributes.get("start_step"))
+            max_raw = scheduler.attributes.get("max_step", scheduler.attributes.get("end_step"))
+            if min_raw is None or max_raw is None:
+                raise ConfigParseError("<Offset> must include 'min_step' and 'max_step'.")
+            min_step = int(min_raw)
+            max_step = int(max_raw)
+            if min_step < 0 or max_step <= min_step:
+                raise ConfigParseError("<Offset> must satisfy 0 <= min_step < max_step.")
+            if max_step > train_steps:
+                raise ConfigParseError(
+                    f"<Offset> max_step={max_step} exceeds <Train steps=\"{train_steps}\">."
+                )
+            continue
+
         start_raw = scheduler.attributes.get("start_step")
         end_raw = scheduler.attributes.get("end_step")
         if start_raw is None or end_raw is None:
@@ -409,6 +438,9 @@ def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[Schedul
                 f"<Scheduler type=\"{scheduler_type}\"> end_step={end_step} exceeds <Train steps=\"{train_steps}\">."
             )
         intervals.append((start_step, end_step, scheduler_type))
+
+    if not intervals:
+        return
 
     intervals.sort(key=lambda x: (x[0], x[1]))
     covered_until = 0
