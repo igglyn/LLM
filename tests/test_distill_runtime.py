@@ -210,9 +210,9 @@ def _runtime_config_xml(glob_path: str, *, min_bytes: str = "4") -> str:
           </Backend>
         </Teacher>
       </Teachers>
-      <StageA enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></StageA>
-      <StageB enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></StageB>
-      <StageC enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></StageC>
+      <Stage name="StageA" enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></Stage>
+      <Stage name="StageB" enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></Stage>
+      <Stage name="StageC" enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></Stage>
     </Distillation>
   </Dataset>
   <Model>
@@ -242,9 +242,9 @@ def _mixture_config_xml() -> str:
           </Backend>
         </Teacher>
       </Teachers>
-      <StageA enabled="false" teacher_ref="teacher_local"><TopKLogits k="3" /></StageA>
-      <StageB enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></StageB>
-      <StageC enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></StageC>
+      <Stage name="StageA" enabled="false" teacher_ref="teacher_local"><TopKLogits k="3" /></Stage>
+      <Stage name="StageB" enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></Stage>
+      <Stage name="StageC" enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></Stage>
     </Distillation>
   </Dataset>
   <Model>

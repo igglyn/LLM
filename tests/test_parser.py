@@ -156,11 +156,14 @@ def test_stage_mode_validation(tmp_path: Path) -> None:
         patcher_transformer='<Transformer />',
         trunk_attrs='name="t1" context="1024"',
         trunk_transformer='<Transformer />',
-    ).replace("<StageA enabled=\"true\" teacher_ref=\"t\"><TopKLogits k=\"16\" /></StageA>", "<StageA enabled=\"true\" teacher_ref=\"t\"><TopKLogits k=\"16\" /><LongContext max_tokens=\"100\" /></StageA>")
+    ).replace(
+        '<Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="16" /></Stage>',
+        '<Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="16" /><LongContext max_tokens="100" /></Stage>',
+    )
     path = tmp_path / "bad_stage.xml"
     path.write_text(xml, encoding="utf-8")
 
-    with pytest.raises(ConfigParseError, match="<StageA> must contain exactly one <TopKLogits> mode block"):
+    with pytest.raises(ConfigParseError, match='must contain exactly one mode block'):
         parse_config(path)
 
 
@@ -193,9 +196,9 @@ def _minimal_valid_xml(*, patcher_attrs: str, patcher_transformer: str, trunk_at
           </Backend>
         </Teacher>
       </Teachers>
-      <StageA enabled="true" teacher_ref="t"><TopKLogits k="16" /></StageA>
-      <StageB enabled="true" teacher_ref="t"><LongContext max_tokens="1024" /></StageB>
-      <StageC enabled="true" teacher_ref="t"><StructuredOutputs schema="json" /></StageC>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="16" /></Stage>
+      <Stage name="StageB" enabled="true" teacher_ref="t"><LongContext max_tokens="1024" /></Stage>
+      <Stage name="StageC" enabled="true" teacher_ref="t"><StructuredOutputs schema="json" /></Stage>
     </Distillation>
   </Dataset>
   <Model>

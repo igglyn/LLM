@@ -17,7 +17,6 @@ from .specs import (
     ExpertSpec,
     FilterSpec,
     GroupSpec,
-    LongContextSpec,
     MixtureBuildSpec,
     MixOfExpertsSpec,
     ModelRefSpec,
@@ -31,13 +30,9 @@ from .specs import (
     SourceSpec,
     SplitMapEntrySpec,
     SplitMappingSpec,
-    StageASpec,
-    StageBSpec,
-    StageCSpec,
-    StructuredOutputsSpec,
+    StageSpec,
     TeacherSpec,
     TeachersSpec,
-    TopKLogitsSpec,
     TrainSpec,
     TransformerBlockSpec,
     TrunkSpec,
@@ -126,12 +121,16 @@ def _parse_mixture_build(elem: ET.Element) -> MixtureBuildSpec:
 
 
 def _parse_distillation(elem: ET.Element) -> DistillationSpec:
+    teachers = _parse_teachers(_required_child(elem, "Teachers"))
+    stages = [_parse_stage(stage_elem) for stage_elem in elem.findall("Stage")]
+
+    if not stages:
+        raise ConfigParseError("<Distillation> must contain at least one <Stage> child.")
+
     return DistillationSpec(
         attributes=dict(elem.attrib),
-        teachers=_parse_teachers(_required_child(elem, "Teachers")),
-        stage_a=_parse_stage_a(_required_child(elem, "StageA")),
-        stage_b=_parse_stage_b(_required_child(elem, "StageB")),
-        stage_c=_parse_stage_c(_required_child(elem, "StageC")),
+        teachers=teachers,
+        stages=stages,
     )
 
 
@@ -154,33 +153,19 @@ def _parse_teachers(elem: ET.Element) -> TeachersSpec:
     return TeachersSpec(teachers=teachers)
 
 
-def _parse_stage_a(elem: ET.Element) -> StageASpec:
-    _validate_single_mode_child(elem, "TopKLogits")
-    mode_elem = _required_child(elem, "TopKLogits")
-    return StageASpec(
+def _parse_stage(elem: ET.Element) -> StageSpec:
+    stage_name = _required_attr(elem, "name")
+    children = list(elem)
+    if len(children) != 1:
+        raise ConfigParseError(f"<Stage name=\"{stage_name}\"> must contain exactly one mode block.")
+    mode_elem = children[0]
+
+    return StageSpec(
+        name=stage_name,
         enabled=_parse_bool_attr(elem, "enabled"),
         teacher_ref=_required_attr(elem, "teacher_ref"),
-        top_k_logits=TopKLogitsSpec(attributes=dict(mode_elem.attrib)),
-    )
-
-
-def _parse_stage_b(elem: ET.Element) -> StageBSpec:
-    _validate_single_mode_child(elem, "LongContext")
-    mode_elem = _required_child(elem, "LongContext")
-    return StageBSpec(
-        enabled=_parse_bool_attr(elem, "enabled"),
-        teacher_ref=_required_attr(elem, "teacher_ref"),
-        long_context=LongContextSpec(attributes=dict(mode_elem.attrib)),
-    )
-
-
-def _parse_stage_c(elem: ET.Element) -> StageCSpec:
-    _validate_single_mode_child(elem, "StructuredOutputs")
-    mode_elem = _required_child(elem, "StructuredOutputs")
-    return StageCSpec(
-        enabled=_parse_bool_attr(elem, "enabled"),
-        teacher_ref=_required_attr(elem, "teacher_ref"),
-        structured_outputs=StructuredOutputsSpec(attributes=dict(mode_elem.attrib)),
+        mode_type=mode_elem.tag,
+        mode_attributes=dict(mode_elem.attrib),
     )
 
 

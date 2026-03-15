@@ -11,20 +11,20 @@ class StageAError(ValueError):
 
 
 def validate_stage_a_mode(config: ResolvedConfigSpec) -> None:
-    stage_a = config.dataset.distillation.stage_a
-    if stage_a is None or stage_a.top_k_logits is None:
+    stage_a = config.dataset.distillation.stage_by_name("StageA")
+    if stage_a is None or stage_a.mode_type != "TopKLogits":
         raise StageAError("StageA mode must be TopKLogits.")
 
 
 def run_stage_a(config: ResolvedConfigSpec, mixture_entries: list[MixtureEntry]) -> list[StageARecord]:
-    stage_a = config.dataset.distillation.stage_a
+    stage_a = config.dataset.distillation.stage_by_name("StageA")
     if stage_a is None:
         raise StageAError("Missing StageA config.")
     if not stage_a.enabled:
         return []
     validate_stage_a_mode(config)
 
-    k = int(stage_a.top_k_logits.attributes.get("k", "0"))
+    k = int(stage_a.mode_attributes.get("k", "0"))
     if k <= 0:
         raise StageAError("StageA TopKLogits requires positive k.")
 
