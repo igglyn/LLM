@@ -107,11 +107,11 @@ def _write_config(tmp_path: Path) -> Path:
   <Model>
     <Defaults d_model="1024" n_heads="8" />
     <Patcher name="p1" patch_size="64" d_model="2048" n_heads="16">
-      <Train mode="finetune">
+      <Train steps="100">
         <Optimizer type="adamw" lr="0.001" weight_decay="0.0">
-          <Scheduler type="warmup" steps="10" />
-          <Scheduler type="cosine" t_max="100" />
-          <Scheduler type="loss_threshold" threshold="1.0" />
+          <Scheduler type="warmup" start_step="0" end_step="10" />
+          <Scheduler type="cosine" start_step="10" end_step="100" />
+          <Scheduler type="loss_threshold" start_step="0" end_step="100" threshold="1.0" />
         </Optimizer>
       </Train>
       <RoPE base="16000" scale="0.5" />
@@ -120,7 +120,7 @@ def _write_config(tmp_path: Path) -> Path:
       <Transformer d_model="1536" n_heads="12" />
     </Patcher>
     <Trunk name="t1" context="2048">
-      <Train mode="full"><Optimizer type="adamw" lr="0.0001" weight_decay="0.1" /></Train>
+      <Train steps="100"><Optimizer type="adamw" lr="0.0001" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
       <DRope base="8000" scale="1.25" />
       <MixOfExperts name="moe1">
         <Expert name="expert_a"><Transformer /></Expert>

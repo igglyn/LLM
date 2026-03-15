@@ -49,9 +49,10 @@
     <Defaults d_model="768" n_heads="12" />
 
     <Patcher name="patcher_text" patch_size="128">
-      <Train mode="finetune">
+      <Train steps="1000">
         <Optimizer type="adamw" lr="0.0003" weight_decay="0.1">
-          <Scheduler type="cosine" t_max="1000" min_lr="0.00001" />
+          <Scheduler type="warmup" start_step="0" end_step="50" min_lr="0.0" max_lr="0.0003" />
+          <Scheduler type="cosine" start_step="50" end_step="1000" min_lr="0.00001" />
         </Optimizer>
       </Train>
       <RoPE base="10000" scale="1.0" />
@@ -59,9 +60,10 @@
     </Patcher>
 
     <Trunk name="main_trunk" context="2048">
-      <Train mode="full">
+      <Train steps="5000">
         <Optimizer type="adamw" lr="0.0001" weight_decay="0.1">
-          <Scheduler type="cosine" t_max="5000" min_lr="0.000005" />
+          <Scheduler type="warmup" start_step="0" end_step="500" min_lr="0.0" max_lr="0.0001" />
+          <Scheduler type="cosine" start_step="500" end_step="5000" min_lr="0.000005" />
         </Optimizer>
       </Train>
       <DRope base="10000" scale="1.0" />

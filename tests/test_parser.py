@@ -52,8 +52,65 @@ def test_scheduler_list_preserves_order() -> None:
     config = parse_config(EXAMPLE_CONFIG_PATH)
 
     first_patcher_schedulers = config.model.patchers[0].train.optimizer.schedulers
-    assert [scheduler.scheduler_type for scheduler in first_patcher_schedulers] == ["cosine", "loss_threshold"]
+    assert [scheduler.scheduler_type for scheduler in first_patcher_schedulers] == ["warmup", "cosine", "loss_threshold"]
+    assert config.model.patchers[0].train.steps == 20000
 
+
+
+
+def test_train_requires_scheduler_step_coverage(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace(
+        '<Scheduler type="cosine" start_step="0" end_step="100" />',
+        '<Scheduler type="cosine" start_step="10" end_step="100" />',
+        1,
+    )
+    path = tmp_path / "uncovered_steps.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ConfigParseError, match="uncovered steps"):
+        parse_config(path)
+
+
+def test_train_requires_scheduler_ranges(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace(
+        '<Scheduler type="cosine" start_step="0" end_step="100" />',
+        '<Scheduler type="cosine" />',
+        1,
+    )
+    path = tmp_path / "missing_scheduler_range.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ConfigParseError, match="start_step"):
+        parse_config(path)
+
+
+
+def test_cosine_scheduler_rejects_t_max(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace(
+        '<Scheduler type="cosine" start_step="0" end_step="100" />',
+        '<Scheduler type="cosine" start_step="0" end_step="100" t_max="100" />',
+        1,
+    )
+    path = tmp_path / "cosine_tmax.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ConfigParseError, match="should not include"):
+        parse_config(path)
 
 def test_patcher_child_block_order_preserves_order() -> None:
     config = parse_config(EXAMPLE_CONFIG_PATH)
@@ -134,20 +191,20 @@ def test_rope_drope_base_and_scale_defaults_and_overrides(tmp_path: Path) -> Non
           </Backend>
         </Teacher>
       </Teachers>
-      <StageA enabled="true" teacher_ref="t"><TopKLogits k="16" /></StageA>
-      <StageB enabled="true" teacher_ref="t"><LongContext max_tokens="1024" /></StageB>
-      <StageC enabled="true" teacher_ref="t"><StructuredOutputs schema="json" /></StageC>
+      <Stage name="StageA" enabled="true" teacher_ref="t"><TopKLogits k="16" /></Stage>
+      <Stage name="StageB" enabled="true" teacher_ref="t"><LongContext max_tokens="1024" /></Stage>
+      <Stage name="StageC" enabled="true" teacher_ref="t"><StructuredOutputs schema="json" /></Stage>
     </Distillation>
   </Dataset>
   <Model>
     <Defaults d_model="1024" n_heads="8" />
     <Patcher name="p1" patch_size="128">
-      <Train mode="finetune"><Optimizer type="adamw" lr="0.001" weight_decay="0.1" /></Train>
+      <Train steps="100"><Optimizer type="adamw" lr="0.001" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
       <RoPE base="32000" scale="0.8" />
       <Transformer />
     </Patcher>
     <Trunk name="t1" context="1024">
-      <Train mode="full"><Optimizer type="adamw" lr="0.0005" weight_decay="0.1" /></Train>
+      <Train steps="100"><Optimizer type="adamw" lr="0.0005" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
       <DRope />
       <Transformer />
     </Trunk>
@@ -180,7 +237,7 @@ def test_resolution_raises_when_transformer_unresolved() -> None:
                 PatcherSpec(
                     name="p",
                     patch_size=1,
-                    train=TrainSpec(mode="x", optimizer=OptimizerSpec(optimizer_type="adamw", lr=0.1, weight_decay=0.0)),
+                    train=TrainSpec(steps=1, optimizer=OptimizerSpec(optimizer_type="adamw", lr=0.1, weight_decay=0.0)),
                     transformer_blocks=[TransformerBlockSpec()],
                     block_order=["Transformer"],
                 )
@@ -256,14 +313,18 @@ def _minimal_valid_xml(*, patcher_attrs: str, patcher_transformer: str, trunk_at
   <Model>
     <Defaults d_model="1024" n_heads="8" />
     <Patcher {patcher_attrs}>
-      <Train mode="finetune">
-        <Optimizer type="adamw" lr="0.001" weight_decay="0.1" />
+      <Train steps="100">
+        <Optimizer type="adamw" lr="0.001" weight_decay="0.1">
+          <Scheduler type="cosine" start_step="0" end_step="100" />
+        </Optimizer>
       </Train>
       {patcher_transformer}
     </Patcher>
     <Trunk {trunk_attrs}>
-      <Train mode="full">
-        <Optimizer type="adamw" lr="0.0005" weight_decay="0.1" />
+      <Train steps="100">
+        <Optimizer type="adamw" lr="0.0005" weight_decay="0.1">
+          <Scheduler type="cosine" start_step="0" end_step="100" />
+        </Optimizer>
       </Train>
       {trunk_transformer}
     </Trunk>

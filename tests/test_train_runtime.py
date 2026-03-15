@@ -35,8 +35,8 @@ def test_summary_smoke_path_exposes_train_fields() -> None:
     smoke_state = runtime.smoke("summary smoke")
 
     assert summary["patchers"][0]["train"]["optimizer"]["type"] == "adamw"
-    assert len(summary["patchers"][0]["train"]["schedulers"]) == 2
-    assert summary["trunk"]["train"]["mode"] == "full"
+    assert len(summary["patchers"][0]["train"]["schedulers"]) == 3
+    assert summary["trunk"]["train"]["steps"] == 50000
     assert summary["has_moe"] is True
     assert "TrunkEnd(main_trunk)" in smoke_state.execution_trace
 

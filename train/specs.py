@@ -27,7 +27,7 @@ class RuntimeSchedulerConfig:
 
 @dataclass(frozen=True)
 class RuntimeTrainConfig:
-    mode: str
+    steps: int
     optimizer_type: str
     lr: float
     weight_decay: float

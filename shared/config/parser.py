@@ -316,11 +316,13 @@ def _parse_moe(elem: ET.Element) -> MixOfExpertsSpec:
 
 def _parse_train(elem: ET.Element) -> TrainSpec:
     optimizer_elem = _required_child(elem, "Optimizer")
+    train_steps = int(_required_attr(elem, "steps"))
 
     schedulers = [
         SchedulerSpec(scheduler_type=_required_attr(scheduler_elem, "type"), attributes=dict(scheduler_elem.attrib))
         for scheduler_elem in optimizer_elem.findall("Scheduler")
     ]
+    _validate_scheduler_step_coverage(train_steps, schedulers)
 
     optimizer = OptimizerSpec(
         optimizer_type=_required_attr(optimizer_elem, "type"),
@@ -328,8 +330,55 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
         weight_decay=float(_required_attr(optimizer_elem, "weight_decay")),
         schedulers=schedulers,
     )
-    return TrainSpec(mode=_required_attr(elem, "mode"), optimizer=optimizer)
+    return TrainSpec(steps=train_steps, optimizer=optimizer)
 
+
+def _validate_scheduler_step_coverage(train_steps: int, schedulers: list[SchedulerSpec]) -> None:
+    if train_steps <= 0:
+        raise ConfigParseError("<Train> attribute 'steps' must be positive.")
+    if not schedulers:
+        raise ConfigParseError("<Train> requires at least one <Scheduler> to cover all training steps.")
+
+    intervals: list[tuple[int, int, str]] = []
+    for scheduler in schedulers:
+        scheduler_type = scheduler.scheduler_type
+        start_raw = scheduler.attributes.get("start_step")
+        end_raw = scheduler.attributes.get("end_step")
+        if start_raw is None or end_raw is None:
+            raise ConfigParseError(
+                f"<Scheduler type=\"{scheduler_type}\"> must include 'start_step' and 'end_step'."
+            )
+        if scheduler_type == "cosine" and "t_max" in scheduler.attributes:
+            raise ConfigParseError(
+                "<Scheduler type=\"cosine\"> should not include \"t_max\"; use start_step/end_step range instead."
+            )
+
+        start_step = int(start_raw)
+        end_step = int(end_raw)
+        if start_step < 0 or end_step <= start_step:
+            raise ConfigParseError(
+                f"<Scheduler type=\"{scheduler_type}\"> must satisfy 0 <= start_step < end_step."
+            )
+        if end_step > train_steps:
+            raise ConfigParseError(
+                f"<Scheduler type=\"{scheduler_type}\"> end_step={end_step} exceeds <Train steps=\"{train_steps}\">."
+            )
+        intervals.append((start_step, end_step, scheduler_type))
+
+    intervals.sort(key=lambda x: (x[0], x[1]))
+    covered_until = 0
+    for start_step, end_step, scheduler_type in intervals:
+        if start_step > covered_until:
+            raise ConfigParseError(
+                f"<Train> has uncovered steps in [{covered_until}, {start_step}); add a scheduler to cover this range."
+            )
+        if start_step <= covered_until:
+            covered_until = max(covered_until, end_step)
+
+    if covered_until < train_steps:
+        raise ConfigParseError(
+            f"<Train> has uncovered steps in [{covered_until}, {train_steps}); add a scheduler to cover this range."
+        )
 
 
 def _source_type(source_elem: ET.Element) -> str:
