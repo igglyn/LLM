@@ -11,7 +11,6 @@ def _train_summary(config: RuntimeTrainConfig) -> dict[str, Any]:
         "steps": config.steps,
         "optimizer": {
             "type": config.optimizer_type,
-            "lr": config.lr,
             "weight_decay": config.weight_decay,
         },
         "schedulers": [

@@ -12,7 +12,6 @@ def runtime_train_config_from_spec(train_spec: TrainSpec) -> RuntimeTrainConfig:
     return RuntimeTrainConfig(
         steps=train_spec.steps,
         optimizer_type=train_spec.optimizer.optimizer_type,
-        lr=train_spec.optimizer.lr,
         weight_decay=train_spec.optimizer.weight_decay,
         schedulers=schedulers,
     )

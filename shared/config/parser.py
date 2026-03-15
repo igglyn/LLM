@@ -326,7 +326,6 @@ def _parse_train(elem: ET.Element) -> TrainSpec:
 
     optimizer = OptimizerSpec(
         optimizer_type=_required_attr(optimizer_elem, "type"),
-        lr=_optional_float_attr(optimizer_elem, "lr"),
         weight_decay=float(_required_attr(optimizer_elem, "weight_decay")),
         schedulers=schedulers,
     )
