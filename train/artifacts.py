@@ -8,7 +8,33 @@ from train.metrics import summarize_model_runtime
 from train.specs import ModelRuntime
 
 
-def write_model_artifact(model_runtime: ModelRuntime, dataset_file: str, output_dir: str) -> Path:
+def write_training_artifact(
+    model_runtime: ModelRuntime,
+    dataset_file: str,
+    output_dir: str,
+    weights_file: str,
+    training: dict[str, Any],
+) -> Path:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    model_file = output_path / "model.json"
+    model_file.write_text(
+        json.dumps(
+            {
+                "dataset_file": dataset_file,
+                "weights_file": weights_file,
+                "training": training,
+                "summary": summarize_model_runtime(model_runtime),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return model_file
+
+
+def write_build_artifact(model_runtime: ModelRuntime, dataset_file: str, output_dir: str) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -28,4 +54,3 @@ def write_model_artifact(model_runtime: ModelRuntime, dataset_file: str, output_
 
 def read_model_artifact(model_file: str) -> dict[str, Any]:
     return json.loads(Path(model_file).read_text(encoding="utf-8"))
-
