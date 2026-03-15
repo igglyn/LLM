@@ -17,6 +17,12 @@ def main() -> None:
     build_parser.add_argument('--output-dir', required=True, help='Directory where trained model artifacts are written')
     build_parser.add_argument('--max-steps', type=int, default=None, help='Optional cap on training steps (defaults to config steps)')
     build_parser.add_argument('--resume-from', default=None, help='Optional checkpoint file to resume build training from')
+    build_parser.add_argument(
+        '--log-every',
+        type=int,
+        default=0,
+        help='Log step, loss, and learning rate every N steps (0 disables step logging)',
+    )
 
     package_parser = subparsers.add_parser('package')
     package_parser.add_argument('--config', required=True, help='Path to XML config')
@@ -40,7 +46,14 @@ def main() -> None:
 
     if args.command == 'build':
         model_runtime = load_model_runtime(args.config)
-        training = train_model(model_runtime=model_runtime, distill_dir=args.distill_dir, output_dir=args.output_dir, max_steps=args.max_steps, resume_from=args.resume_from)
+        training = train_model(
+            model_runtime=model_runtime,
+            distill_dir=args.distill_dir,
+            output_dir=args.output_dir,
+            max_steps=args.max_steps,
+            resume_from=args.resume_from,
+            log_every_steps=args.log_every,
+        )
         model_file = write_training_artifact(
             model_runtime=model_runtime,
             dataset_file=args.distill_dir,
