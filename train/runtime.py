@@ -31,6 +31,7 @@ def train_model(
     output_dir: str,
     max_steps: int | None = None,
     resume_from: str | None = None,
+    log_every_steps: int = 0,
 ) -> dict[str, Any]:
     distill_root = Path(distill_dir)
     output_path = Path(output_dir)
@@ -110,6 +111,9 @@ def train_model(
 
         detached_loss = float(loss.detach().cpu())
         losses.append(detached_loss)
+
+        if log_every_steps > 0 and (step + 1) % log_every_steps == 0:
+            print(f"step={step + 1} loss={detached_loss:.6f} lr={current_lr:.8f}")
 
         if save_every > 0 and (step + 1) % save_every == 0:
             checkpoints_dir.mkdir(parents=True, exist_ok=True)

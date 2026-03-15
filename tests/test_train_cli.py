@@ -255,6 +255,38 @@ def test_build_reads_jsonl_token_mapping_from_distill_dir(tmp_path: Path) -> Non
     assert artifact['training']['token_mapping_file'] == str(distill_dir / 'token_mapping.jsonl')
 
 
+
+def test_build_log_every_prints_step_loss_and_lr(tmp_path: Path) -> None:
+    config_path = _write_small_dim_config(tmp_path, d_model=64, n_heads=4)
+    distill_dir = _write_distill_dir(tmp_path)
+    output_dir = tmp_path / 'model_logs'
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'train',
+            'build',
+            '--config',
+            str(config_path),
+            '--distill-dir',
+            str(distill_dir),
+            '--output-dir',
+            str(output_dir),
+            '--max-steps',
+            '4',
+            '--log-every',
+            '2',
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert 'step=2 loss=' in completed.stdout
+    assert 'lr=' in completed.stdout
+    assert 'step=4 loss=' in completed.stdout
+
 def _write_distill_dir(tmp_path: Path) -> Path:
     distill_dir = tmp_path / 'distill'
     distill_dir.mkdir(parents=True, exist_ok=True)
