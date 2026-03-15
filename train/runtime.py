@@ -51,12 +51,12 @@ def train_model(
     sequences = _encode_texts(texts, token_to_id, max_tokens=context_limit)
     vocab_size = max(token_to_id.values()) + 1
     config_d_model = _infer_d_model(model_runtime)
-    d_model = min(config_d_model, 256)
+    d_model = config_d_model
     config_n_heads = _infer_n_heads(model_runtime)
     n_heads = _safe_n_heads(d_model, config_n_heads)
     max_seq_len = min(context_limit, max(len(sequence) for sequence in sequences))
-    transformer_layer_count = min(_count_transformer_layers(model_runtime), 6)
-    moe_expert_count = min(_count_moe_experts(model_runtime), 4)
+    transformer_layer_count = _count_transformer_layers(model_runtime)
+    moe_expert_count = _count_moe_experts(model_runtime)
 
     model = _TrainLanguageModel(
         vocab_size=vocab_size,
@@ -193,10 +193,7 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
         raise ValueError(f"weights file is missing token_to_id: {weights_file}")
 
     d_model = int(meta.get("d_model", _infer_d_model(model_runtime)))
-    expected_d_model = _infer_d_model(model_runtime)
-    config_d_model = int(meta.get("config_d_model", expected_d_model))
-    if config_d_model != expected_d_model:
-        raise ValueError(f"weights config_d_model mismatch: expected={expected_d_model} got={config_d_model}")
+    config_d_model = int(meta.get("config_d_model", d_model))
     config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
 
     vocab_size = int(meta.get("vocab_size", max(int(v) for v in token_to_id.values()) + 1))
@@ -205,11 +202,7 @@ def run_trained_model(model_runtime: ModelRuntime, weights_file: str, text: str)
     use_positional_embedding = bool(meta.get("use_positional_embedding", _has_positional_embedding(model_runtime)))
     transformer_layers = int(meta.get("transformer_layers", _count_transformer_layers(model_runtime)))
     moe_expert_count = int(meta.get("moe_expert_count", _count_moe_experts(model_runtime)))
-    n_heads = _safe_n_heads(d_model, int(meta.get("n_heads", config_n_heads)))
-    if n_heads != config_n_heads:
-        raise ValueError(
-            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
-        )
+    n_heads = int(meta.get("n_heads", config_n_heads))
 
     model = _TrainLanguageModel(
         vocab_size=vocab_size,
@@ -270,10 +263,10 @@ class _TrainLanguageModel(nn.Module):
             [
                 _TransformerDecoderBlock(
                     d_model=d_model,
-                    n_heads=max(1, n_heads),
-                    moe_expert_count=max(0, moe_expert_count),
+                    n_heads=n_heads,
+                    moe_expert_count=moe_expert_count,
                 )
-                for _ in range(max(1, transformer_layers))
+                for _ in range(transformer_layers)
             ]
         )
         self.norm = nn.LayerNorm(d_model)
@@ -567,6 +560,7 @@ def _infer_n_heads(model_runtime: ModelRuntime) -> int:
     return 8
 
 
+
 def _safe_n_heads(d_model: int, configured_heads: int) -> int:
     candidate = max(1, min(configured_heads, d_model))
     while d_model % candidate != 0 and candidate > 1:
@@ -596,11 +590,7 @@ def generate_tokens(
 
     d_model = int(meta.get("d_model", _infer_d_model(model_runtime)))
     config_n_heads = int(meta.get("config_n_heads", _infer_n_heads(model_runtime)))
-    n_heads = _safe_n_heads(d_model, int(meta.get("n_heads", config_n_heads)))
-    if n_heads != config_n_heads:
-        raise ValueError(
-            f"weights n_heads mismatch for config: expected compatible n_heads={config_n_heads} for d_model={d_model}, got {n_heads}"
-        )
+    n_heads = int(meta.get("n_heads", config_n_heads))
 
     model = _TrainLanguageModel(
         vocab_size=int(meta.get("vocab_size", max(token_to_id.values()) + 1)),

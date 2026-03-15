@@ -56,6 +56,8 @@ def main() -> None:
                 'optimizer_type': training['optimizer_type'],
                 'transformer_layers': training['transformer_layers'],
                 'moe_expert_count': training['moe_expert_count'],
+                'config_d_model': training['config_d_model'],
+                'config_n_heads': training['config_n_heads'],
                 'dataset_examples': training['dataset_examples'],
                 'data_files': training['data_files'],
                 'token_mapping_file': training['token_mapping_file'],
