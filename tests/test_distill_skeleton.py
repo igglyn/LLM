@@ -97,6 +97,28 @@ def test_huggingface_source_type_is_available(tmp_path: Path, monkeypatch: pytes
 
 
 
+
+
+def test_huggingface_source_with_config_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_datasets = ModuleType("datasets")
+
+    def fake_load_dataset(name: str, config: str, *, split: str):
+        assert name == "my-dataset"
+        assert config == "wikitext-103-v1"
+        assert split == "train"
+        return [{"body": "hello cfg"}]
+
+    fake_datasets.load_dataset = fake_load_dataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    config = tmp_path / "hf_config.xml"
+    config.write_text(_hf_config_xml(dataset_config="wikitext-103-v1"), encoding="utf-8")
+    resolved = resolve_config(parse_config(config))
+
+    rows = run_extraction(resolved)
+    assert len(rows) == 1
+    assert rows[0].metadata["hf_config"] == "wikitext-103-v1"
+
 def test_huggingface_max_entries_filter_limits_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_datasets = ModuleType("datasets")
 
@@ -152,13 +174,13 @@ def _config_xml(glob_path: str, *, topk_k: str = "3") -> str:
 """
 
 
-def _hf_config_xml(*, max_entries: str | None = None) -> str:
+def _hf_config_xml(*, max_entries: str | None = None, dataset_config: str | None = None) -> str:
     return f"""
 <Config>
   <Dataset>
     <SourceExtraction>
       <DatasetEntry name="set_hf">
-        <Source name="hf" type="huggingface" uri="my-dataset" split="train" text_column="body" />
+        <Source name="hf" type="huggingface" uri="my-dataset" split="train" text_column="body" {f'config="{dataset_config}"' if dataset_config is not None else ''} />
         {f'<Filter type="max_entries" value="{max_entries}" />' if max_entries is not None else ''}
       </DatasetEntry>
     </SourceExtraction>

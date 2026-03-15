@@ -86,6 +86,28 @@ def test_stage_a_end_to_end_smoke_with_dummy_teacher(tmp_path: Path) -> None:
     assert {"record_id", "doc_id", "prompt_text", "target_text", "top_k_predictions", "metadata"} <= set(row)
 
 
+
+
+def test_runtime_huggingface_source_with_config_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_datasets = ModuleType("datasets")
+
+    def fake_load_dataset(name: str, config: str, *, split: str):
+        assert name == "my-dataset"
+        assert config == "wikitext-2-raw-v1"
+        assert split == "train"
+        return [{"body": "runtime hf"}]
+
+    fake_datasets.load_dataset = fake_load_dataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    config_path = tmp_path / "config.xml"
+    config_path.write_text(_runtime_hf_config_xml(dataset_config="wikitext-2-raw-v1"), encoding="utf-8")
+    config = parse_config(config_path)
+
+    docs = run_source_extraction(config)
+    assert len(docs) == 1
+    assert docs[0].metadata["hf_config"] == "wikitext-2-raw-v1"
+
 def test_hf_backend_interface_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_transformers = ModuleType("transformers")
     fake_torch = ModuleType("torch")
@@ -261,6 +283,43 @@ def _mixture_config_xml() -> str:
         </Teacher>
       </Teachers>
       <Stage name="StageA" enabled="false" teacher_ref="teacher_local"><TopKLogits k="3" /></Stage>
+      <Stage name="StageB" enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></Stage>
+      <Stage name="StageC" enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></Stage>
+    </Distillation>
+  </Dataset>
+  <Model>
+    <Defaults d_model="1024" n_heads="8" />
+    <Patcher name="p1" patch_size="128"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Patcher>
+    <Trunk name="t1" context="1024"><Train steps="10"><Optimizer type="adamw" weight_decay="0.0"><Scheduler type="cosine" start_step="0" end_step="10" /></Optimizer></Train><Transformer /></Trunk>
+  </Model>
+</Config>
+"""
+
+
+def _runtime_hf_config_xml(*, dataset_config: str | None = None) -> str:
+    return f"""
+<Config>
+  <Dataset>
+    <SourceExtraction>
+      <DatasetEntry name="set_hf">
+        <Source name="hf" type="huggingface" uri="my-dataset" split="train" text_column="body" {f'config="{dataset_config}"' if dataset_config is not None else ''} />
+      </DatasetEntry>
+    </SourceExtraction>
+    <MixtureBuild target_documents="1" random_seed="7" min_bytes="1" depletion_policy="rebalance">
+      <Group name="g1" percentage="100">
+        <DatasetRef name="set_hf" />
+      </Group>
+    </MixtureBuild>
+    <Distillation>
+      <Teachers>
+        <Teacher name="teacher_local">
+          <Backend type="dummy_local">
+            <ModelRef name_or_path="dummy" />
+            <Execution device="cpu" precision="fp32" />
+          </Backend>
+        </Teacher>
+      </Teachers>
+      <Stage name="StageA" enabled="true" teacher_ref="teacher_local"><TopKLogits k="3" /></Stage>
       <Stage name="StageB" enabled="false" teacher_ref="teacher_local"><LongContext max_tokens="1024" /></Stage>
       <Stage name="StageC" enabled="false" teacher_ref="teacher_local"><StructuredOutputs schema="json" /></Stage>
     </Distillation>
