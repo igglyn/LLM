@@ -237,6 +237,8 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
 def _parse_trunk(elem: ET.Element) -> TrunkSpec:
     train = _parse_train(_required_child(elem, "Train"))
 
+    rope_blocks: List[RoPEBlockSpec] = []
+    pos_embedding_blocks: List[PosEmbeddingBlockSpec] = []
     drope_blocks: List[DRopeBlockSpec] = []
     transformer_blocks: List[TransformerBlockSpec] = []
     moe_blocks: List[MixOfExpertsSpec] = []
@@ -245,7 +247,21 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
     for child in list(elem):
         if child.tag == "Train":
             continue
-        if child.tag == "DRope":
+        if child.tag == "RoPE":
+            rope_blocks.append(
+                RoPEBlockSpec(
+                    d_model=_optional_int_attr(child, "d_model"),
+                    n_heads=_optional_int_attr(child, "n_heads"),
+                    base=_optional_float_attr(child, "base"),
+                    scale=_optional_float_attr(child, "scale"),
+                    attributes=dict(child.attrib),
+                )
+            )
+            block_order.append("RoPE")
+        elif child.tag == "PosEmbedding":
+            pos_embedding_blocks.append(PosEmbeddingBlockSpec(attributes=dict(child.attrib)))
+            block_order.append("PosEmbedding")
+        elif child.tag == "DRope":
             drope_blocks.append(
                 DRopeBlockSpec(
                     d_model=_optional_int_attr(child, "d_model"),
@@ -277,6 +293,8 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
         d_model=_optional_int_attr(elem, "d_model"),
         n_heads=_optional_int_attr(elem, "n_heads"),
         train=train,
+        rope_blocks=rope_blocks,
+        pos_embedding_blocks=pos_embedding_blocks,
         drope_blocks=drope_blocks,
         transformer_blocks=transformer_blocks,
         mix_of_experts_blocks=moe_blocks,

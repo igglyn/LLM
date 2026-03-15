@@ -214,6 +214,8 @@ class TrunkSpec:
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
     train: TrainSpec | None = None
+    rope_blocks: List[RoPEBlockSpec] = field(default_factory=list)
+    pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
     drope_blocks: List[DRopeBlockSpec] = field(default_factory=list)
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
     mix_of_experts_blocks: List[MixOfExpertsSpec] = field(default_factory=list)
@@ -297,6 +299,8 @@ class ResolvedTrunkSpec:
     name: str
     context: int
     train: TrainSpec
+    rope_blocks: List[ResolvedRoPEBlockSpec] = field(default_factory=list)
+    pos_embedding_blocks: List[PosEmbeddingBlockSpec] = field(default_factory=list)
     drope_blocks: List[ResolvedDRopeBlockSpec] = field(default_factory=list)
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
     mix_of_experts_blocks: List[ResolvedMixOfExpertsSpec] = field(default_factory=list)
