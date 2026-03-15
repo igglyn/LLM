@@ -160,6 +160,22 @@ def test_train_parses_batch_size_and_save_every(tmp_path: Path) -> None:
     assert parsed.model.patchers[0].train.save_every == 25
 
 
+
+
+def test_train_parses_device_attribute(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<Transformer />',
+    ).replace('<Train steps="100">', '<Train steps="100" device="cuda:1">')
+    path = tmp_path / "train_device.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    parsed = parse_config(path)
+    assert parsed.model.patchers[0].train.device == "cuda:1"
+    assert parsed.model.trunk.train.device == "cuda:1"
+
 def test_train_rejects_non_positive_batch_size(tmp_path: Path) -> None:
     xml = _minimal_valid_xml(
         patcher_attrs='name="p1" patch_size="128"',

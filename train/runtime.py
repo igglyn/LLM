@@ -47,6 +47,7 @@ def train_model(
     configured_batch_size = model_runtime.trunk.train_config.batch_size
     save_every = model_runtime.trunk.train_config.save_every
     optimizer_type = model_runtime.trunk.train_config.optimizer_type
+    configured_device = model_runtime.trunk.train_config.device
     has_pos_embedding = _has_positional_embedding(model_runtime)
     has_vocab_embedding = _has_vocab_embedding(model_runtime)
 
@@ -69,6 +70,8 @@ def train_model(
         moe_expert_count=moe_expert_count,
         dropout=model_runtime.trunk.train_config.dropout,
     )
+    trunk_model = trunk_model.to(configured_device)
+
     trunk_optimizer = _build_optimizer(
         optimizer_type=optimizer_type,
         parameters=trunk_model.parameters(),
@@ -91,6 +94,8 @@ def train_model(
         moe_expert_count=0,
         dropout=patcher_train_config.dropout,
     )
+    patcher_model = patcher_model.to(configured_device)
+
     patcher_optimizer = _build_optimizer(
         optimizer_type=patcher_train_config.optimizer_type,
         parameters=patcher_model.parameters(),
@@ -108,6 +113,7 @@ def train_model(
             patcher_model=patcher_model,
             patcher_optimizer=patcher_optimizer,
             checkpoint_file=resume_from,
+            training_device=configured_device,
         )
 
     checkpoints_dir = output_path / "checkpoints"
@@ -128,6 +134,8 @@ def train_model(
         ]
         trunk_input_ids, _ = _next_token_batch(trunk_batch_sequences, pad_id=token_to_id["<pad>"])
         patcher_input_ids, _ = _next_token_batch(patcher_batch_sequences, pad_id=token_to_id["<pad>"])
+        trunk_input_ids = trunk_input_ids.to(configured_device)
+        patcher_input_ids = patcher_input_ids.to(configured_device)
 
         scheduled_trunk_lr = trunk_schedule_fn(step)
         trunk_lr = scheduled_trunk_lr * trunk_lr_multiplier
@@ -143,7 +151,7 @@ def train_model(
         trunk_skip_step = _is_offset_step(model_runtime.trunk.train_config.schedulers, step)
 
         if patcher_skip_step:
-            patcher_loss = torch.tensor(0.0)
+            patcher_loss = torch.tensor(0.0, device=configured_device)
         else:
             patcher_logits = patcher_model.reconstruct_logits(patcher_input_ids)
             patcher_loss = _masked_token_cross_entropy(
@@ -158,7 +166,7 @@ def train_model(
             patcher_optimizer.step()
 
         if trunk_skip_step:
-            next_patch_loss = torch.tensor(0.0)
+            next_patch_loss = torch.tensor(0.0, device=configured_device)
         else:
             trunk_optimizer.zero_grad()
             with torch.no_grad():
@@ -168,7 +176,7 @@ def train_model(
                 patch_size=max(1, model_runtime.patchers[0].patch_size) if model_runtime.patchers else 1,
             )
             if patch_input_latents.shape[1] == 0:
-                next_patch_loss = torch.tensor(0.0)
+                next_patch_loss = torch.tensor(0.0, device=configured_device)
             else:
                 predicted_patch_latents = trunk_model(patch_input_latents)
                 next_patch_loss = _masked_latent_mse(
@@ -256,6 +264,7 @@ def train_model(
                 "batch_size": configured_batch_size,
                 "save_every": save_every,
                 "optimizer_type": optimizer_type,
+                "training_device": configured_device,
                 "grad_clip": model_runtime.trunk.train_config.grad_clip,
                 "schedulers": [
                     {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
@@ -284,6 +293,7 @@ def train_model(
         "configured_batch_size": configured_batch_size,
         "save_every": save_every,
         "optimizer_type": optimizer_type,
+        "training_device": configured_device,
         "grad_clip": model_runtime.trunk.train_config.grad_clip,
         "checkpoint_files": checkpoint_files,
         "dataset_examples": len(texts),
@@ -669,8 +679,9 @@ def _resume_training_state(
     patcher_model: nn.Module,
     patcher_optimizer: torch.optim.Optimizer,
     checkpoint_file: str,
+    training_device: str,
 ) -> int:
-    payload = torch.load(checkpoint_file, map_location="cpu")
+    payload = torch.load(checkpoint_file, map_location=training_device)
     model_state = payload.get("model_state")
     optimizer_state = payload.get("optimizer_state")
     if not isinstance(model_state, dict) or not isinstance(optimizer_state, dict):

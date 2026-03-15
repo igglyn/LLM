@@ -44,6 +44,7 @@ def test_summary_smoke_path_exposes_train_fields() -> None:
     assert summary["patchers"][0]["train"]["optimizer"]["grad_clip"] is None
     assert summary["patchers"][0]["train"]["batch_size"] == 8
     assert summary["patchers"][0]["train"]["save_every"] == 5000
+    assert summary["patchers"][0]["train"]["device"] == "cuda"
     assert len(summary["patchers"][0]["train"]["schedulers"]) == 3
     assert summary["trunk"]["train"]["steps"] == 50000
     assert summary["has_moe"] is True

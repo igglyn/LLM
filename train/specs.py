@@ -33,6 +33,7 @@ class RuntimeTrainConfig:
     steps: int
     batch_size: int
     save_every: int
+    device: str
     optimizer_type: str
     weight_decay: float
     dropout: float
