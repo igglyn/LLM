@@ -148,6 +148,8 @@ def train_model(
             )
             patcher_optimizer.zero_grad()
             patcher_loss.backward()
+            if patcher_train_config.grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(patcher_model.parameters(), patcher_train_config.grad_clip)
             patcher_optimizer.step()
 
         if trunk_skip_step:
@@ -161,6 +163,8 @@ def train_model(
             )
             trunk_optimizer.zero_grad()
             next_token_loss.backward()
+            if model_runtime.trunk.train_config.grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(trunk_model.parameters(), model_runtime.trunk.train_config.grad_clip)
             trunk_optimizer.step()
 
         loss = patcher_loss + next_token_loss
@@ -219,6 +223,7 @@ def train_model(
                 "batch_size": configured_batch_size,
                 "save_every": save_every,
                 "optimizer_type": optimizer_type,
+                "grad_clip": model_runtime.trunk.train_config.grad_clip,
                 "schedulers": [
                     {"type": scheduler.scheduler_type, "attributes": dict(scheduler.attributes)}
                     for scheduler in model_runtime.trunk.train_config.schedulers
@@ -245,6 +250,7 @@ def train_model(
         "configured_batch_size": configured_batch_size,
         "save_every": save_every,
         "optimizer_type": optimizer_type,
+        "grad_clip": model_runtime.trunk.train_config.grad_clip,
         "checkpoint_files": checkpoint_files,
         "dataset_examples": len(texts),
         "data_files": data_files,
