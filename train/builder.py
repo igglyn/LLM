@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from shared.config.specs import ResolvedConfigSpec, ResolvedMixOfExpertsSpec, ResolvedPatcherSpec, ResolvedTrunkSpec
-from train.blocks import DRopeBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEBlock, TransformerBlock
+from train.blocks import DRopeBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEBlock, TransformerBlock, VocabEmbeddingBlock
 from train.optim import runtime_train_config_from_spec
 from train.specs import ExpertRuntime, ModelRuntime, PatcherRuntime, RuntimeBlock, TrunkRuntime
 
@@ -47,7 +47,7 @@ def _build_trunk_runtime(trunk: ResolvedTrunkSpec) -> TrunkRuntime:
 
 
 def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
-    indexes = {"RoPE": 0, "PosEmbedding": 0, "Transformer": 0}
+    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "Transformer": 0}
     blocks: list[RuntimeBlock] = []
 
     for block_name in patcher.block_order:
@@ -59,6 +59,10 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
             block = patcher.pos_embedding_blocks[indexes[block_name]]
             indexes[block_name] += 1
             blocks.append(PosEmbeddingBlock(attributes=dict(block.attributes)))
+        elif block_name == "VocabEmbedding":
+            block = patcher.vocab_embedding_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            blocks.append(VocabEmbeddingBlock(vocab_size=block.vocab_size))
         elif block_name == "Transformer":
             block = patcher.transformer_blocks[indexes[block_name]]
             indexes[block_name] += 1
@@ -71,7 +75,7 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
 
 
 def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
-    indexes = {"RoPE": 0, "PosEmbedding": 0, "DRope": 0, "Transformer": 0, "MixOfExperts": 0}
+    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "DRope": 0, "Transformer": 0, "MixOfExperts": 0}
     blocks: list[RuntimeBlock] = []
 
     for block_name in trunk.block_order:
@@ -83,6 +87,10 @@ def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
             block = trunk.pos_embedding_blocks[indexes[block_name]]
             indexes[block_name] += 1
             blocks.append(PosEmbeddingBlock(attributes=dict(block.attributes)))
+        elif block_name == "VocabEmbedding":
+            block = trunk.vocab_embedding_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            blocks.append(VocabEmbeddingBlock(vocab_size=block.vocab_size))
         elif block_name == "DRope":
             block = trunk.drope_blocks[indexes[block_name]]
             indexes[block_name] += 1
