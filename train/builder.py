@@ -57,11 +57,19 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
 
 
 def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
-    indexes = {"DRope": 0, "Transformer": 0, "MixOfExperts": 0}
+    indexes = {"RoPE": 0, "PosEmbedding": 0, "DRope": 0, "Transformer": 0, "MixOfExperts": 0}
     blocks: list[RuntimeBlock] = []
 
     for block_name in trunk.block_order:
-        if block_name == "DRope":
+        if block_name == "RoPE":
+            block = trunk.rope_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            blocks.append(RoPEBlock(d_model=block.d_model, n_heads=block.n_heads, base=block.base, scale=block.scale))
+        elif block_name == "PosEmbedding":
+            block = trunk.pos_embedding_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            blocks.append(PosEmbeddingBlock(attributes=dict(block.attributes)))
+        elif block_name == "DRope":
             block = trunk.drope_blocks[indexes[block_name]]
             indexes[block_name] += 1
             blocks.append(DRopeBlock(d_model=block.d_model, n_heads=block.n_heads, base=block.base, scale=block.scale))

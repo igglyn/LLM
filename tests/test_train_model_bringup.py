@@ -21,6 +21,9 @@ def test_resolved_defaults_and_overrides(tmp_path: Path) -> None:
     assert patcher.rope_blocks[0].n_heads == 16
     assert patcher.rope_blocks[0].base == 16000.0
     assert patcher.rope_blocks[0].scale == 0.5
+    assert resolved.model.trunk.rope_blocks[0].base == 12000.0
+    assert resolved.model.trunk.rope_blocks[0].scale == 0.75
+    assert resolved.model.trunk.pos_embedding_blocks[0].attributes["type"] == "learned"
     assert resolved.model.trunk.drope_blocks[0].base == 8000.0
     assert resolved.model.trunk.drope_blocks[0].scale == 1.25
 
@@ -42,8 +45,10 @@ def test_trunk_forward_order(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path)
     trace = runtime.smoke("hello").execution_trace
     trunk_start = trace.index("TrunkStart(t1)")
-    assert trace[trunk_start : trunk_start + 3] == [
+    assert trace[trunk_start : trunk_start + 5] == [
         "TrunkStart(t1)",
+        "RoPE(d_model=1024,n_heads=8,base=12000.0,scale=0.75)",
+        "PosEmbedding",
         "DRope(d_model=1024,n_heads=8,base=8000.0,scale=1.25)",
         "MoERoute(moe1->expert_b)",
     ]
@@ -121,6 +126,8 @@ def _write_config(tmp_path: Path) -> Path:
     </Patcher>
     <Trunk name="t1" context="2048">
       <Train steps="100"><Optimizer type="adamw" weight_decay="0.1"><Scheduler type="cosine" start_step="0" end_step="100" /></Optimizer></Train>
+      <RoPE base="12000" scale="0.75" />
+      <PosEmbedding type="learned" />
       <DRope base="8000" scale="1.25" />
       <MixOfExperts name="moe1">
         <Expert name="expert_a"><Transformer /></Expert>

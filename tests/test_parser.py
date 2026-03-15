@@ -134,6 +134,27 @@ def test_patcher_child_block_order_preserves_order() -> None:
     assert config.model.patchers[1].block_order == ["PosEmbedding", "RoPE", "Transformer"]
 
 
+
+
+def test_trunk_child_block_order_accepts_rope_and_pos_embedding(tmp_path: Path) -> None:
+    xml = _minimal_valid_xml(
+        patcher_attrs='name="p1" patch_size="128"',
+        patcher_transformer='<Transformer />',
+        trunk_attrs='name="t1" context="1024"',
+        trunk_transformer='<RoPE base="24000" scale="0.9" /><PosEmbedding type="learned" /><DRope /><Transformer />',
+    )
+    path = tmp_path / "trunk_rope_pos_embedding.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    resolved = resolve_config(parse_config(path))
+    trunk = resolved.model.trunk
+
+    assert trunk is not None
+    assert trunk.block_order == ["RoPE", "PosEmbedding", "DRope", "Transformer"]
+    assert trunk.rope_blocks[0].base == 24000.0
+    assert trunk.rope_blocks[0].scale == 0.9
+    assert trunk.pos_embedding_blocks[0].attributes["type"] == "learned"
+
 def test_model_level_defaults_resolve_for_transformer() -> None:
     config = parse_config(EXAMPLE_CONFIG_PATH)
     resolved = resolve_config(config)

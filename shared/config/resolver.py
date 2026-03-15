@@ -82,6 +82,9 @@ def _resolve_trunk(raw_trunk: TrunkSpec, model_defaults: DefaultsSpec) -> Resolv
         _resolve_transformer_block(block, container_defaults=trunk_defaults, context=f"Trunk '{raw_trunk.name}'")
         for block in raw_trunk.transformer_blocks
     ]
+    resolved_ropes = [
+        _resolve_rope_block(block, container_defaults=trunk_defaults) for block in raw_trunk.rope_blocks
+    ]
     resolved_dropes = [
         _resolve_drope_block(block, container_defaults=trunk_defaults) for block in raw_trunk.drope_blocks
     ]
@@ -96,6 +99,8 @@ def _resolve_trunk(raw_trunk: TrunkSpec, model_defaults: DefaultsSpec) -> Resolv
         name=raw_trunk.name,
         context=raw_trunk.context,
         train=raw_trunk.train,
+        rope_blocks=resolved_ropes,
+        pos_embedding_blocks=raw_trunk.pos_embedding_blocks,
         drope_blocks=resolved_dropes,
         transformer_blocks=resolved_transformers,
         mix_of_experts_blocks=resolved_moes,
