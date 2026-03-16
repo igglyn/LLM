@@ -17,7 +17,11 @@ from train.runtime import (
     _TransformerDecoderBlock,
     _apply_loss_threshold_decay,
     _is_offset_step,
+    _masked_latent_mse,
+    _next_iteration_target,
     _pool_patch_latents,
+    _update_stage_buffers,
+    _validate_stage_batch_sizes,
 )
 from train.specs import RuntimeSchedulerConfig
 
@@ -202,3 +206,45 @@ def test_pool_patch_latents_can_include_incomplete_tail_for_generation() -> None
 
     assert pooled.shape[1] == 3
     assert torch.equal(pooled, latents[:, [1, 3, 4], :])
+
+
+
+def test_validate_stage_batch_sizes_requires_previous_to_be_multiple() -> None:
+    class _Train:
+        def __init__(self, batch_size: int) -> None:
+            self.batch_size = batch_size
+
+    class _Stage:
+        def __init__(self, batch_size: int) -> None:
+            self.train_config = _Train(batch_size)
+
+    _validate_stage_batch_sizes(patchers=[_Stage(8), _Stage(4)], trunk=_Stage(2))
+
+    try:
+        _validate_stage_batch_sizes(patchers=[_Stage(6), _Stage(4)], trunk=_Stage(2))
+        assert False, "expected ValueError for incompatible batch sizes"
+    except ValueError:
+        pass
+
+
+def test_update_stage_buffers_rolls_when_context_is_full() -> None:
+    stage_sequence = torch.tensor([[[1.0], [2.0], [3.0]]])
+    buffers = [torch.zeros(1, 2, 1)]
+    filled = [0]
+
+    _update_stage_buffers(stage_buffers=buffers, stage_filled_counts=filled, stage_sequences=[stage_sequence], iteration=0)
+    _update_stage_buffers(stage_buffers=buffers, stage_filled_counts=filled, stage_sequences=[stage_sequence], iteration=1)
+    _update_stage_buffers(stage_buffers=buffers, stage_filled_counts=filled, stage_sequences=[stage_sequence], iteration=2)
+
+    assert filled == [2]
+    assert torch.equal(buffers[0], torch.tensor([[[2.0], [3.0]]]))
+
+
+def test_next_iteration_target_and_masked_latent_mse_mask_out_missing_targets() -> None:
+    sequence = torch.tensor([[[1.0, 0.0], [2.0, 1.0]]])
+    target, mask = _next_iteration_target(sequence, iteration=1)
+
+    assert mask.tolist() == [False]
+    pred = torch.zeros(1, 2)
+    loss = _masked_latent_mse(predicted_latents=pred, target_latents=target, mask=mask)
+    assert float(loss) == 0.0
