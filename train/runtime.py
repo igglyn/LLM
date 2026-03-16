@@ -175,13 +175,20 @@ def train_model(
 
         patcher_skip_step = _is_offset_step(patcher_train_config.schedulers, step)
         trunk_skip_step = _is_offset_step(model_runtime.trunk.train_config.schedulers, step)
+        patcher_offset_flags = [_is_offset_step(patcher.train_config.schedulers, step) for patcher in patchers]
 
         pair_losses: list[torch.Tensor] = []
         patcher_input: torch.Tensor = patcher_input_ids
-        patcher_grad_context = torch.no_grad if patcher_skip_step else torch.enable_grad
-        with patcher_grad_context():
-            for idx, (encoder, decoder, patch_size) in enumerate(zip(patcher_encoders, patcher_decoders, patch_sizes)):
-                if not patcher_skip_step:
+        for idx, (encoder, decoder, patch_size) in enumerate(zip(patcher_encoders, patcher_decoders, patch_sizes)):
+            stage_offset = patcher_offset_flags[idx] if idx < len(patcher_offset_flags) else patcher_skip_step
+            next_stage_offset = (idx + 1) < len(patcher_offset_flags) and patcher_offset_flags[idx + 1]
+            stage_mode = _patcher_stage_execution_mode(stage_offset=stage_offset, next_stage_offset=next_stage_offset)
+            if stage_mode == "skip":
+                continue
+
+            stage_grad_context = torch.no_grad if stage_mode == "no_grad" else torch.enable_grad
+            with stage_grad_context():
+                if stage_mode == "grad":
                     patcher_optimizer.zero_grad()
                 token_latents = encoder(patcher_input)
                 patch_latents = _pool_patch_latents(token_latents, patch_size=patch_size, include_incomplete_tail=True)
@@ -196,7 +203,7 @@ def train_model(
                 else:
                     pair_loss = _masked_latent_mse(decoded, patcher_input)
 
-                if not patcher_skip_step:
+                if stage_mode == "grad":
                     pair_loss.backward()
                     if patcher_train_config.grad_clip is not None:
                         torch.nn.utils.clip_grad_norm_([
@@ -868,6 +875,14 @@ def _apply_loss_threshold_decay(
             threshold["triggered"] = True
     return updated_multiplier
 
+
+
+def _patcher_stage_execution_mode(stage_offset: bool, next_stage_offset: bool) -> str:
+    if next_stage_offset:
+        return "skip"
+    if stage_offset:
+        return "no_grad"
+    return "grad"
 
 
 def _is_offset_step(schedulers: list[RuntimeSchedulerConfig], step: int) -> bool:

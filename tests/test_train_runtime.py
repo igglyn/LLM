@@ -19,6 +19,7 @@ from train.runtime import (
     _is_offset_step,
     _masked_latent_mse,
     _next_iteration_target,
+    _patcher_stage_execution_mode,
     _pool_patch_latents,
     _update_stage_buffers,
     _validate_stage_batch_sizes,
@@ -248,3 +249,11 @@ def test_next_iteration_target_and_masked_latent_mse_mask_out_missing_targets() 
     pred = torch.zeros(1, 2)
     loss = _masked_latent_mse(predicted_latents=pred, target_latents=target, mask=mask)
     assert float(loss) == 0.0
+
+
+
+def test_patcher_stage_execution_mode_prioritizes_next_offset_skip() -> None:
+    assert _patcher_stage_execution_mode(stage_offset=False, next_stage_offset=True) == "skip"
+    assert _patcher_stage_execution_mode(stage_offset=True, next_stage_offset=True) == "skip"
+    assert _patcher_stage_execution_mode(stage_offset=True, next_stage_offset=False) == "no_grad"
+    assert _patcher_stage_execution_mode(stage_offset=False, next_stage_offset=False) == "grad"
