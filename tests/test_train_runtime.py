@@ -3,10 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from shared.config import parse_config, resolve_config
-from train.blocks import MixOfExpertsBlock
+from train.blocks import DRopeBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEBlock, TransformerBlock
 from train.builder import build_model_runtime
 from train.metrics import summarize_model_runtime
-from train.runtime import _apply_loss_threshold_decay, _is_offset_step
+from train.runtime import (
+    _TrainPatcherModel,
+    _TrainRoPE,
+    _TrainDRope,
+    _TrainTrunkModel,
+    _TransformerDecoderBlock,
+    _apply_loss_threshold_decay,
+    _is_offset_step,
+)
 from train.specs import RuntimeSchedulerConfig
 
 
@@ -102,3 +110,44 @@ def test_loss_threshold_decay_is_one_shot_per_threshold() -> None:
     )
     assert lr_multiplier == 0.5
 
+
+
+def test_train_trunk_compiles_layers_from_trunk_blocks() -> None:
+    blocks = [
+        DRopeBlock(d_model=16, n_heads=4, base=10000.0, scale=1.0),
+        PosEmbeddingBlock(attributes={}),
+        TransformerBlock(d_model=16, n_heads=4),
+    ]
+    model = _TrainTrunkModel(
+        d_model=16,
+        use_positional_embedding=True,
+        blocks=blocks,
+        n_heads=4,
+        max_seq_len=32,
+    )
+
+    # PosEmbedding is represented separately and should not be compiled into decoder layers.
+    assert len(model.layers) == len([b for b in blocks if b.block_name != "PosEmbedding"])
+    assert isinstance(model.layers[0], _TrainDRope)
+    assert isinstance(model.layers[1], _TransformerDecoderBlock)
+
+
+def test_train_patcher_compiles_layers_from_patcher_blocks() -> None:
+    patcher_blocks = [
+        RoPEBlock(d_model=16, n_heads=4, base=10000.0, scale=1.0),
+        PosEmbeddingBlock(attributes={}),
+        TransformerBlock(d_model=16, n_heads=4),
+    ]
+    model = _TrainPatcherModel(
+        d_model=16,
+        vocab_size=256,
+        max_seq_len=32,
+        use_vocab_embedding=True,
+        use_positional_embedding=True,
+        blocks=patcher_blocks,
+        n_heads=4,
+    )
+
+    assert len(model.layers) == len([b for b in patcher_blocks if b.block_name != "PosEmbedding"])
+    assert isinstance(model.layers[0], _TrainRoPE)
+    assert isinstance(model.layers[1], _TransformerDecoderBlock)
