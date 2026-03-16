@@ -9,7 +9,8 @@ from train.blocks import DRopeBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEB
 from train.builder import build_model_runtime
 from train.metrics import summarize_model_runtime
 from train.runtime import (
-    _TrainPatcherModel,
+    _PatcherDecoder,
+    _PatcherEncoder,
     _TrainRoPE,
     _TrainDRope,
     _TrainTrunkModel,
@@ -135,13 +136,13 @@ def test_train_trunk_compiles_layers_from_trunk_blocks() -> None:
     assert isinstance(model.layers[1], _TransformerDecoderBlock)
 
 
-def test_train_patcher_compiles_layers_from_patcher_blocks() -> None:
+def test_patcher_encoder_and_decoder_compile_layers_from_patcher_blocks() -> None:
     patcher_blocks = [
         RoPEBlock(d_model=16, n_heads=4, base=10000.0, scale=1.0),
         PosEmbeddingBlock(attributes={}),
         TransformerBlock(d_model=16, n_heads=4),
     ]
-    model = _TrainPatcherModel(
+    encoder = _PatcherEncoder(
         d_model=16,
         vocab_size=256,
         max_seq_len=32,
@@ -151,9 +152,40 @@ def test_train_patcher_compiles_layers_from_patcher_blocks() -> None:
         n_heads=4,
     )
 
-    assert len(model.layers) == len([b for b in patcher_blocks if b.block_name != "PosEmbedding"])
-    assert isinstance(model.layers[0], _TrainRoPE)
-    assert isinstance(model.layers[1], _TransformerDecoderBlock)
+    decoder = _PatcherDecoder(
+        d_model=16,
+        vocab_size=256,
+        blocks=patcher_blocks,
+        n_heads=4,
+    )
+
+    assert len(encoder.layers) == len([b for b in patcher_blocks if b.block_name != "PosEmbedding"])
+    assert isinstance(encoder.layers[0], _TrainRoPE)
+    assert isinstance(encoder.layers[1], _TransformerDecoderBlock)
+    assert len(decoder.layers) == len([b for b in patcher_blocks if b.block_name != "PosEmbedding"])
+    assert isinstance(decoder.layers[0], _TrainRoPE)
+    assert isinstance(decoder.layers[1], _TransformerDecoderBlock)
+
+
+def test_patcher_encoder_and_decoder_do_not_share_parameters() -> None:
+    blocks = [TransformerBlock(d_model=16, n_heads=4)]
+    encoder = _PatcherEncoder(
+        d_model=16,
+        vocab_size=128,
+        max_seq_len=8,
+        use_vocab_embedding=True,
+        use_positional_embedding=True,
+        blocks=blocks,
+        n_heads=4,
+    )
+    decoder = _PatcherDecoder(
+        d_model=16,
+        vocab_size=128,
+        blocks=blocks,
+        n_heads=4,
+    )
+
+    assert {id(param) for param in encoder.parameters()}.isdisjoint({id(param) for param in decoder.parameters()})
 
 
 def test_pool_patch_latents_ignores_incomplete_tail_by_default() -> None:

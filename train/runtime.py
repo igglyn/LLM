@@ -83,7 +83,7 @@ def train_model(
 
     patcher_train_config = model_runtime.patchers[0].train_config if model_runtime.patchers else model_runtime.trunk.train_config
     patcher_blocks = model_runtime.patchers[0].blocks if model_runtime.patchers else model_runtime.trunk.blocks
-    patcher_model = _TrainPatcherModel(
+    patcher_encoder = _PatcherEncoder(
         d_model=d_model,
         vocab_size=vocab_size,
         max_seq_len=max_seq_len,
@@ -93,11 +93,28 @@ def train_model(
         n_heads=n_heads,
         dropout=patcher_train_config.dropout,
     )
-    patcher_model = patcher_model.to(configured_device)
+    patcher_encoder = patcher_encoder.to(configured_device)
+
+    patcher_decoder = _PatcherDecoder(
+        d_model=d_model,
+        vocab_size=vocab_size,
+        blocks=patcher_blocks,
+        n_heads=n_heads,
+        dropout=patcher_train_config.dropout,
+    )
+    patcher_decoder = patcher_decoder.to(configured_device)
+
+    encoder_param_ids = {id(param) for param in patcher_encoder.parameters()}
+    decoder_param_ids = {id(param) for param in patcher_decoder.parameters()}
+    if encoder_param_ids & decoder_param_ids:
+        raise ValueError("patcher encoder and decoder must not share parameters")
 
     patcher_optimizer = _build_optimizer(
         optimizer_type=patcher_train_config.optimizer_type,
-        parameters=patcher_model.parameters(),
+        parameters=[
+            {"params": patcher_encoder.parameters(), "name": "patcher_encoder"},
+            {"params": patcher_decoder.parameters(), "name": "patcher_decoder"},
+        ],
         weight_decay=patcher_train_config.weight_decay,
     )
     patcher_schedule_fn = _build_schedule_fn(patcher_train_config.schedulers, total_steps=steps)
@@ -109,7 +126,8 @@ def train_model(
         start_step = _resume_training_state(
             trunk_model=trunk_model,
             trunk_optimizer=trunk_optimizer,
-            patcher_model=patcher_model,
+            patcher_encoder=patcher_encoder,
+            patcher_decoder=patcher_decoder,
             patcher_optimizer=patcher_optimizer,
             checkpoint_file=resume_from,
             training_device=configured_device,
@@ -152,7 +170,8 @@ def train_model(
         if patcher_skip_step:
             patcher_loss = torch.tensor(0.0, device=configured_device)
         else:
-            patcher_logits = patcher_model.reconstruct_logits(patcher_input_ids)
+            patcher_latents_for_reconstruction = patcher_encoder(patcher_input_ids)
+            patcher_logits = patcher_decoder(patcher_latents_for_reconstruction)
             patcher_loss = _masked_token_cross_entropy(
                 logits=patcher_logits,
                 target_ids=patcher_input_ids,
@@ -161,7 +180,7 @@ def train_model(
             patcher_optimizer.zero_grad()
             patcher_loss.backward()
             if patcher_train_config.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(patcher_model.parameters(), patcher_train_config.grad_clip)
+                torch.nn.utils.clip_grad_norm_([*patcher_encoder.parameters(), *patcher_decoder.parameters()], patcher_train_config.grad_clip)
             patcher_optimizer.step()
 
         if trunk_skip_step:
@@ -169,7 +188,7 @@ def train_model(
         else:
             trunk_optimizer.zero_grad()
             with torch.no_grad():
-                patcher_latents = patcher_model.encode_patch_latents(trunk_input_ids)
+                patcher_latents = patcher_encoder(trunk_input_ids)
             patch_input_latents, patch_target_latents = _next_patch_latent_batch(
                 patcher_latents=patcher_latents,
                 patch_size=max(1, model_runtime.patchers[0].patch_size) if model_runtime.patchers else 1,
@@ -229,7 +248,8 @@ def train_model(
                 {
                     "model_state": trunk_model.state_dict(),
                     "optimizer_state": trunk_optimizer.state_dict(),
-                    "patcher_model_state": patcher_model.state_dict(),
+                    "patcher_encoder_state": patcher_encoder.state_dict(),
+                    "patcher_decoder_state": patcher_decoder.state_dict(),
                     "patcher_optimizer_state": patcher_optimizer.state_dict(),
                     "step": step + 1,
                     "loss": detached_loss,
@@ -244,7 +264,8 @@ def train_model(
     torch.save(
         {
             "model_state": trunk_model.state_dict(),
-            "patcher_model_state": patcher_model.state_dict(),
+            "patcher_encoder_state": patcher_encoder.state_dict(),
+            "patcher_decoder_state": patcher_decoder.state_dict(),
             "meta": {
                 "vocab_size": vocab_size,
                 "d_model": d_model,
@@ -363,10 +384,13 @@ def run_trained_model(
     model.load_state_dict(state_dict)
     model.eval()
 
-    patcher_state = payload.get("patcher_model_state")
-    if not isinstance(patcher_state, dict):
-        raise ValueError(f"weights file is missing patcher_model_state: {weights_file}")
-    patcher_model = _TrainPatcherModel(
+    patcher_encoder_state = payload.get("patcher_encoder_state")
+    patcher_decoder_state = payload.get("patcher_decoder_state")
+    if not isinstance(patcher_encoder_state, dict):
+        raise ValueError(f"weights file is missing patcher_encoder_state: {weights_file}")
+    if not isinstance(patcher_decoder_state, dict):
+        raise ValueError(f"weights file is missing patcher_decoder_state: {weights_file}")
+    patcher_encoder = _PatcherEncoder(
         vocab_size=vocab_size,
         d_model=d_model,
         max_seq_len=max_seq_len,
@@ -376,8 +400,18 @@ def run_trained_model(
         n_heads=n_heads,
         dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
     )
-    patcher_model.load_state_dict(patcher_state)
-    patcher_model.eval()
+    patcher_encoder.load_state_dict(patcher_encoder_state)
+    patcher_encoder.eval()
+
+    patcher_decoder = _PatcherDecoder(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        blocks=model_runtime.patchers[0].blocks if model_runtime.patchers else model_runtime.trunk.blocks,
+        n_heads=n_heads,
+        dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
+    )
+    patcher_decoder.load_state_dict(patcher_decoder_state)
+    patcher_decoder.eval()
 
     encoded = _encode_texts([text], {str(k): int(v) for k, v in token_to_id.items()}, max_tokens=max_seq_len)[0]
     pad_id = int(meta.get("pad_id", 0))
@@ -388,7 +422,7 @@ def run_trained_model(
     for _ in range(max(0, max_new_tokens)):
         window = encoded[-max_seq_len:]
         input_ids, _ = _next_token_batch([window], pad_id=pad_id)
-        patch_latents = patcher_model.encode_patch_latents(input_ids)
+        patch_latents = patcher_encoder(input_ids)
         patch_sequence = _pool_patch_latents(
             patch_latents,
             patch_size,
@@ -399,7 +433,7 @@ def run_trained_model(
         patch_input = patch_sequence[:, -1:, :]
         with torch.no_grad():
             predicted_patch = model(patch_input)
-            logits = patcher_model.decode_latents(predicted_patch)
+            logits = patcher_decoder(predicted_patch)
 
         next_token_logits = logits[0, -1]
         next_token_id = int(torch.argmax(next_token_logits).item())
@@ -429,7 +463,7 @@ def run_trained_model(
     }
 
 
-class _TrainPatcherModel(nn.Module):
+class _PatcherEncoder(nn.Module):
     def __init__(
         self,
         d_model: int,
@@ -447,12 +481,9 @@ class _TrainPatcherModel(nn.Module):
         self.positional_embedding = nn.Embedding(max_seq_len, d_model) if use_positional_embedding else None
         self.layers = _compile_decoder_layers(blocks=blocks, fallback_d_model=d_model, fallback_n_heads=n_heads, dropout=dropout)
         self.norm = nn.LayerNorm(d_model)
-        self.latent_dim = d_model
-        self.latent_head = nn.Linear(d_model, self.latent_dim)
-        self.latent_to_model = nn.Linear(self.latent_dim, d_model)
-        self.head = nn.Linear(d_model, vocab_size)
+        self.latent_head = nn.Linear(d_model, d_model)
 
-    def encode_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _encode_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.vocab_embedding is not None:
             x = self.vocab_embedding(input_ids)
         elif self.token_projection is not None:
@@ -465,13 +496,10 @@ class _TrainPatcherModel(nn.Module):
             x = x + self.positional_embedding(positions)
         return x
 
-    def encode_patch_latents(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.forward_latents_from_encoded(self.encode_tokens(input_ids))
-
-    def forward_latents_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
-        x = encoded_inputs
-        seq_len = encoded_inputs.shape[1]
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=encoded_inputs.device, dtype=torch.bool), diagonal=1)
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        x = self._encode_tokens(input_ids)
+        seq_len = x.shape[1]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
             if isinstance(layer, _TransformerDecoderBlock):
                 x = layer(x, causal_mask)
@@ -480,14 +508,32 @@ class _TrainPatcherModel(nn.Module):
         x = self.norm(x)
         return self.latent_head(x)
 
-    def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
-        return self.head(self.latent_to_model(latents))
 
-    def reconstruct_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.reconstruct_logits_from_encoded(self.encode_tokens(input_ids))
+class _PatcherDecoder(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        vocab_size: int,
+        blocks: list[Any],
+        n_heads: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.layers = _compile_decoder_layers(blocks=blocks, fallback_d_model=d_model, fallback_n_heads=n_heads, dropout=dropout)
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
 
-    def reconstruct_logits_from_encoded(self, encoded_inputs: torch.Tensor) -> torch.Tensor:
-        return self.decode_latents(self.latent_head(encoded_inputs))
+    def forward(self, latents: torch.Tensor) -> torch.Tensor:
+        x = latents
+        seq_len = x.shape[1]
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
+        for layer in self.layers:
+            if isinstance(layer, _TransformerDecoderBlock):
+                x = layer(x, causal_mask)
+            else:
+                x = layer(x)
+        x = self.norm(x)
+        return self.head(x)
 
 
 class _TrainTrunkModel(nn.Module):
@@ -727,10 +773,12 @@ def _is_offset_step(schedulers: list[RuntimeSchedulerConfig], step: int) -> bool
             return True
     return False
 
+
 def _resume_training_state(
     trunk_model: nn.Module,
     trunk_optimizer: torch.optim.Optimizer,
-    patcher_model: nn.Module,
+    patcher_encoder: nn.Module,
+    patcher_decoder: nn.Module,
     patcher_optimizer: torch.optim.Optimizer,
     checkpoint_file: str,
     training_device: str,
@@ -743,10 +791,12 @@ def _resume_training_state(
     trunk_model.load_state_dict(model_state)
     trunk_optimizer.load_state_dict(optimizer_state)
 
-    patcher_model_state = payload.get("patcher_model_state")
+    patcher_encoder_state = payload.get("patcher_encoder_state")
+    patcher_decoder_state = payload.get("patcher_decoder_state")
     patcher_optimizer_state = payload.get("patcher_optimizer_state")
-    if isinstance(patcher_model_state, dict) and isinstance(patcher_optimizer_state, dict):
-        patcher_model.load_state_dict(patcher_model_state)
+    if isinstance(patcher_encoder_state, dict) and isinstance(patcher_decoder_state, dict) and isinstance(patcher_optimizer_state, dict):
+        patcher_encoder.load_state_dict(patcher_encoder_state)
+        patcher_decoder.load_state_dict(patcher_decoder_state)
         patcher_optimizer.load_state_dict(patcher_optimizer_state)
 
     return int(payload.get("step", 0))
