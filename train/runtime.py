@@ -221,7 +221,7 @@ def train_model(
                 )
             context_window = max(1, model_runtime.trunk.context)
             patch_input_latents, patch_target_latents = _context_patch_prediction_batch(patch_sequence, context=context_window)
-            if patch_input_latents.shape[0] == 0 or patch_input_latents.shape[1] == 0:
+            if patch_input_latents.shape[0] == 0:
                 next_patch_loss = torch.tensor(0.0, device=configured_device)
             else:
                 predicted_patch_latents = trunk_model(patch_input_latents)[:, -1, :]
