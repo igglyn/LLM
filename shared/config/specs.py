@@ -196,11 +196,19 @@ class TransformerBlockSpec:
 
 
 @dataclass(frozen=True)
+class CrossAttentionBlockSpec:
+    d_model: Optional[int] = None
+    n_heads: Optional[int] = None
+    attributes: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ExpertSpec:
     name: str
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
+    cross_attention_blocks: List[CrossAttentionBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
 
@@ -222,6 +230,7 @@ class PatcherSpec:
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     layer_norm_blocks: List[LayerNormBlockSpec] = field(default_factory=list)
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
+    cross_attention_blocks: List[CrossAttentionBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
 
@@ -237,6 +246,7 @@ class TrunkSpec:
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     drope_blocks: List[DRopeBlockSpec] = field(default_factory=list)
     transformer_blocks: List[TransformerBlockSpec] = field(default_factory=list)
+    cross_attention_blocks: List[CrossAttentionBlockSpec] = field(default_factory=list)
     mix_of_experts_blocks: List[MixOfExpertsSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
@@ -272,6 +282,13 @@ class ResolvedTransformerBlockSpec:
 
 
 @dataclass(frozen=True)
+class ResolvedCrossAttentionBlockSpec:
+    d_model: int
+    n_heads: int
+    attributes: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ResolvedRoPEBlockSpec:
     d_model: int
     n_heads: int
@@ -293,6 +310,7 @@ class ResolvedDRopeBlockSpec:
 class ResolvedExpertSpec:
     name: str
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
+    cross_attention_blocks: List[ResolvedCrossAttentionBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
 
@@ -312,6 +330,7 @@ class ResolvedPatcherSpec:
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     layer_norm_blocks: List[LayerNormBlockSpec] = field(default_factory=list)
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
+    cross_attention_blocks: List[ResolvedCrossAttentionBlockSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 
 
@@ -325,6 +344,7 @@ class ResolvedTrunkSpec:
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = field(default_factory=list)
     drope_blocks: List[ResolvedDRopeBlockSpec] = field(default_factory=list)
     transformer_blocks: List[ResolvedTransformerBlockSpec] = field(default_factory=list)
+    cross_attention_blocks: List[ResolvedCrossAttentionBlockSpec] = field(default_factory=list)
     mix_of_experts_blocks: List[ResolvedMixOfExpertsSpec] = field(default_factory=list)
     block_order: List[str] = field(default_factory=list)
 

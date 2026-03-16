@@ -37,6 +37,7 @@ from .specs import (
     TeachersSpec,
     TrainSpec,
     TransformerBlockSpec,
+    CrossAttentionBlockSpec,
     TrunkSpec,
 )
 
@@ -194,6 +195,7 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = []
     layer_norm_blocks: List[LayerNormBlockSpec] = []
     transformer_blocks: List[TransformerBlockSpec] = []
+    cross_attention_blocks: List[CrossAttentionBlockSpec] = []
     block_order: List[str] = []
 
     for child in list(elem):
@@ -230,6 +232,15 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
                 )
             )
             block_order.append("Transformer")
+        elif child.tag == "CrossAttention":
+            cross_attention_blocks.append(
+                CrossAttentionBlockSpec(
+                    d_model=_optional_int_attr(child, "d_model"),
+                    n_heads=_optional_int_attr(child, "n_heads"),
+                    attributes=dict(child.attrib),
+                )
+            )
+            block_order.append("CrossAttention")
         else:
             raise ConfigParseError(f"<Patcher> contains unsupported child <{child.tag}>.")
 
@@ -244,6 +255,7 @@ def _parse_patcher(elem: ET.Element) -> PatcherSpec:
         vocab_embedding_blocks=vocab_embedding_blocks,
         layer_norm_blocks=layer_norm_blocks,
         transformer_blocks=transformer_blocks,
+        cross_attention_blocks=cross_attention_blocks,
         block_order=block_order,
     )
 
@@ -256,6 +268,7 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
     vocab_embedding_blocks: List[VocabEmbeddingBlockSpec] = []
     drope_blocks: List[DRopeBlockSpec] = []
     transformer_blocks: List[TransformerBlockSpec] = []
+    cross_attention_blocks: List[CrossAttentionBlockSpec] = []
     moe_blocks: List[MixOfExpertsSpec] = []
     block_order: List[str] = []
 
@@ -301,6 +314,15 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
                 )
             )
             block_order.append("Transformer")
+        elif child.tag == "CrossAttention":
+            cross_attention_blocks.append(
+                CrossAttentionBlockSpec(
+                    d_model=_optional_int_attr(child, "d_model"),
+                    n_heads=_optional_int_attr(child, "n_heads"),
+                    attributes=dict(child.attrib),
+                )
+            )
+            block_order.append("CrossAttention")
         elif child.tag == "MixOfExperts":
             moe_blocks.append(_parse_moe(child))
             block_order.append("MixOfExperts")
@@ -318,6 +340,7 @@ def _parse_trunk(elem: ET.Element) -> TrunkSpec:
         vocab_embedding_blocks=vocab_embedding_blocks,
         drope_blocks=drope_blocks,
         transformer_blocks=transformer_blocks,
+        cross_attention_blocks=cross_attention_blocks,
         mix_of_experts_blocks=moe_blocks,
         block_order=block_order,
     )
@@ -327,6 +350,7 @@ def _parse_moe(elem: ET.Element) -> MixOfExpertsSpec:
     experts: List[ExpertSpec] = []
     for expert_elem in elem.findall("Expert"):
         transformer_blocks: List[TransformerBlockSpec] = []
+        cross_attention_blocks: List[CrossAttentionBlockSpec] = []
         block_order: List[str] = []
         for child in list(expert_elem):
             if child.tag == "Transformer":
@@ -338,6 +362,15 @@ def _parse_moe(elem: ET.Element) -> MixOfExpertsSpec:
                     )
                 )
                 block_order.append("Transformer")
+            elif child.tag == "CrossAttention":
+                cross_attention_blocks.append(
+                    CrossAttentionBlockSpec(
+                        d_model=_optional_int_attr(child, "d_model"),
+                        n_heads=_optional_int_attr(child, "n_heads"),
+                        attributes=dict(child.attrib),
+                    )
+                )
+                block_order.append("CrossAttention")
             else:
                 raise ConfigParseError(f"<Expert> contains unsupported child <{child.tag}>.")
 
@@ -347,6 +380,7 @@ def _parse_moe(elem: ET.Element) -> MixOfExpertsSpec:
                 d_model=_optional_int_attr(expert_elem, "d_model"),
                 n_heads=_optional_int_attr(expert_elem, "n_heads"),
                 transformer_blocks=transformer_blocks,
+                cross_attention_blocks=cross_attention_blocks,
                 block_order=block_order,
             )
         )

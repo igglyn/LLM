@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from shared.config.specs import ResolvedConfigSpec, ResolvedMixOfExpertsSpec, ResolvedPatcherSpec, ResolvedTrunkSpec
 from train.blocks import (
+    CrossAttentionBlock,
     DRopeBlock,
     LayerNormBlock,
     MixOfExpertsBlock,
@@ -68,7 +69,7 @@ def _build_trunk_runtime(trunk: ResolvedTrunkSpec) -> TrunkRuntime:
 
 
 def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
-    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "LayerNorm": 0, "Transformer": 0}
+    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "LayerNorm": 0, "Transformer": 0, "CrossAttention": 0}
     blocks: list[RuntimeBlock] = []
 
     for block_name in patcher.block_order:
@@ -93,6 +94,11 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
             indexes[block_name] += 1
             layers = _transformer_layers(block.attributes, f"Patcher '{patcher.name}'")
             blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
+        elif block_name == "CrossAttention":
+            block = patcher.cross_attention_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            layers = _transformer_layers(block.attributes, f"Patcher '{patcher.name}'")
+            blocks.extend(CrossAttentionBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
         else:
             raise ValueError(f"Unsupported patcher child block '{block_name}'.")
 
@@ -100,7 +106,7 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
 
 
 def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
-    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "DRope": 0, "Transformer": 0, "MixOfExperts": 0}
+    indexes = {"RoPE": 0, "PosEmbedding": 0, "VocabEmbedding": 0, "DRope": 0, "Transformer": 0, "CrossAttention": 0, "MixOfExperts": 0}
     blocks: list[RuntimeBlock] = []
 
     for block_name in trunk.block_order:
@@ -125,6 +131,11 @@ def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
             indexes[block_name] += 1
             layers = _transformer_layers(block.attributes, f"Trunk '{trunk.name}'")
             blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
+        elif block_name == "CrossAttention":
+            block = trunk.cross_attention_blocks[indexes[block_name]]
+            indexes[block_name] += 1
+            layers = _transformer_layers(block.attributes, f"Trunk '{trunk.name}'")
+            blocks.extend(CrossAttentionBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
         elif block_name == "MixOfExperts":
             block = trunk.mix_of_experts_blocks[indexes[block_name]]
             indexes[block_name] += 1
@@ -139,14 +150,21 @@ def _build_moe_runtime(moe: ResolvedMixOfExpertsSpec) -> MixOfExpertsBlock:
     experts: list[ExpertRuntime] = []
     for expert in moe.experts:
         transformer_index = 0
+        cross_attention_index = 0
         expert_blocks: list[RuntimeBlock] = []
         for block_name in expert.block_order:
-            if block_name != "Transformer":
+            if block_name == "Transformer":
+                block = expert.transformer_blocks[transformer_index]
+                transformer_index += 1
+                layers = _transformer_layers(block.attributes, f"Expert '{expert.name}'")
+                expert_blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
+            elif block_name == "CrossAttention":
+                block = expert.cross_attention_blocks[cross_attention_index]
+                cross_attention_index += 1
+                layers = _transformer_layers(block.attributes, f"Expert '{expert.name}'")
+                expert_blocks.extend(CrossAttentionBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
+            else:
                 raise ValueError(f"Unsupported expert child block '{block_name}'.")
-            block = expert.transformer_blocks[transformer_index]
-            transformer_index += 1
-            layers = _transformer_layers(block.attributes, f"Expert '{expert.name}'")
-            expert_blocks.extend(TransformerBlock(d_model=block.d_model, n_heads=block.n_heads) for _ in range(layers))
         experts.append(ExpertRuntime(name=expert.name, blocks=expert_blocks))
 
     return MixOfExpertsBlock(name=moe.name, experts=experts)
