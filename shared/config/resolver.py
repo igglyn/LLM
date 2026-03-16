@@ -4,12 +4,14 @@ from dataclasses import replace
 
 from .specs import (
     ConfigSpec,
+    CrossAttentionBlockSpec,
     DRopeBlockSpec,
     DefaultsSpec,
     ExpertSpec,
     MixOfExpertsSpec,
     PatcherSpec,
     ResolvedConfigSpec,
+    ResolvedCrossAttentionBlockSpec,
     ResolvedDRopeBlockSpec,
     ResolvedExpertSpec,
     ResolvedMixOfExpertsSpec,
@@ -57,6 +59,10 @@ def _resolve_patcher(raw_patcher: PatcherSpec, model_defaults: DefaultsSpec) -> 
         _resolve_transformer_block(block, container_defaults=patcher_defaults, context=f"Patcher '{raw_patcher.name}'")
         for block in raw_patcher.transformer_blocks
     ]
+    resolved_cross_attention = [
+        _resolve_cross_attention_block(block, container_defaults=patcher_defaults, context=f"Patcher '{raw_patcher.name}'")
+        for block in raw_patcher.cross_attention_blocks
+    ]
     resolved_ropes = [
         _resolve_rope_block(block, container_defaults=patcher_defaults) for block in raw_patcher.rope_blocks
     ]
@@ -73,6 +79,7 @@ def _resolve_patcher(raw_patcher: PatcherSpec, model_defaults: DefaultsSpec) -> 
         vocab_embedding_blocks=raw_patcher.vocab_embedding_blocks,
         layer_norm_blocks=raw_patcher.layer_norm_blocks,
         transformer_blocks=resolved_transformers,
+        cross_attention_blocks=resolved_cross_attention,
         block_order=list(raw_patcher.block_order),
     )
 
@@ -83,6 +90,10 @@ def _resolve_trunk(raw_trunk: TrunkSpec, model_defaults: DefaultsSpec) -> Resolv
     resolved_transformers = [
         _resolve_transformer_block(block, container_defaults=trunk_defaults, context=f"Trunk '{raw_trunk.name}'")
         for block in raw_trunk.transformer_blocks
+    ]
+    resolved_cross_attention = [
+        _resolve_cross_attention_block(block, container_defaults=trunk_defaults, context=f"Trunk '{raw_trunk.name}'")
+        for block in raw_trunk.cross_attention_blocks
     ]
     resolved_ropes = [
         _resolve_rope_block(block, container_defaults=trunk_defaults) for block in raw_trunk.rope_blocks
@@ -106,6 +117,7 @@ def _resolve_trunk(raw_trunk: TrunkSpec, model_defaults: DefaultsSpec) -> Resolv
         vocab_embedding_blocks=raw_trunk.vocab_embedding_blocks,
         drope_blocks=resolved_dropes,
         transformer_blocks=resolved_transformers,
+        cross_attention_blocks=resolved_cross_attention,
         mix_of_experts_blocks=resolved_moes,
         block_order=list(raw_trunk.block_order),
     )
@@ -126,9 +138,18 @@ def _resolve_expert(raw_expert: ExpertSpec, trunk_defaults: DefaultsSpec) -> Res
         )
         for block in raw_expert.transformer_blocks
     ]
+    resolved_cross_attention = [
+        _resolve_cross_attention_block(
+            block,
+            container_defaults=expert_defaults,
+            context=f"Expert '{raw_expert.name}'",
+        )
+        for block in raw_expert.cross_attention_blocks
+    ]
     return ResolvedExpertSpec(
         name=raw_expert.name,
         transformer_blocks=resolved_transformers,
+        cross_attention_blocks=resolved_cross_attention,
         block_order=list(raw_expert.block_order),
     )
 
@@ -146,6 +167,21 @@ def _resolve_transformer_block(
     _validate_heads(context=context, d_model=d_model, n_heads=n_heads)
 
     return ResolvedTransformerBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
+
+
+def _resolve_cross_attention_block(
+    raw_block: CrossAttentionBlockSpec,
+    container_defaults: DefaultsSpec,
+    context: str,
+) -> ResolvedCrossAttentionBlockSpec:
+    d_model = raw_block.d_model if raw_block.d_model is not None else container_defaults.d_model
+    n_heads = raw_block.n_heads if raw_block.n_heads is not None else container_defaults.n_heads
+
+    if d_model is None or n_heads is None:
+        raise ConfigResolutionError(f"{context} has <CrossAttention> missing d_model or n_heads after resolution.")
+    _validate_heads(context=context, d_model=d_model, n_heads=n_heads)
+
+    return ResolvedCrossAttentionBlockSpec(d_model=d_model, n_heads=n_heads, attributes=dict(raw_block.attributes))
 
 
 def _resolve_rope_block(raw_block: RoPEBlockSpec, container_defaults: DefaultsSpec) -> ResolvedRoPEBlockSpec:
