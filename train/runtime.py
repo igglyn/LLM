@@ -9,7 +9,7 @@ from torch import nn
 
 from shared.config import parse_config, resolve_config
 from train.builder import build_model_runtime
-from train.blocks import MixOfExpertsBlock, TransformerBlock
+from train.blocks import CrossAttentionBlock, DRopeBlock, LayerNormBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEBlock, TransformerBlock
 from train.specs import ModelRuntime, RuntimeState, RuntimeSchedulerConfig
 
 
@@ -65,9 +65,9 @@ def train_model(
     trunk_model = _TrainTrunkModel(
         d_model=d_model,
         use_positional_embedding=has_pos_embedding,
-        transformer_layers=transformer_layer_count,
+        blocks=model_runtime.trunk.blocks,
         n_heads=n_heads,
-        moe_expert_count=moe_expert_count,
+        max_seq_len=max_seq_len,
         dropout=model_runtime.trunk.train_config.dropout,
     )
     trunk_model = trunk_model.to(configured_device)
@@ -81,17 +81,16 @@ def train_model(
     trunk_loss_thresholds = _loss_threshold_schedulers(model_runtime.trunk.train_config.schedulers, total_steps=steps)
     trunk_lr_multiplier = 1.0
 
-    patcher_layer_count = _count_patcher_transformer_layers(model_runtime)
     patcher_train_config = model_runtime.patchers[0].train_config if model_runtime.patchers else model_runtime.trunk.train_config
+    patcher_blocks = model_runtime.patchers[0].blocks if model_runtime.patchers else model_runtime.trunk.blocks
     patcher_model = _TrainPatcherModel(
         d_model=d_model,
         vocab_size=vocab_size,
         max_seq_len=max_seq_len,
         use_vocab_embedding=has_vocab_embedding,
         use_positional_embedding=has_pos_embedding,
-        transformer_layers=max(1, patcher_layer_count),
+        blocks=patcher_blocks,
         n_heads=n_heads,
-        moe_expert_count=0,
         dropout=patcher_train_config.dropout,
     )
     patcher_model = patcher_model.to(configured_device)
@@ -356,9 +355,9 @@ def run_trained_model(
     model = _TrainTrunkModel(
         d_model=d_model,
         use_positional_embedding=use_positional_embedding,
-        transformer_layers=transformer_layers,
+        blocks=model_runtime.trunk.blocks,
         n_heads=n_heads,
-        moe_expert_count=moe_expert_count,
+        max_seq_len=max_seq_len,
         dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
     )
     model.load_state_dict(state_dict)
@@ -373,9 +372,8 @@ def run_trained_model(
         max_seq_len=max_seq_len,
         use_vocab_embedding=use_vocab_embedding,
         use_positional_embedding=use_positional_embedding,
-        transformer_layers=max(1, _count_patcher_transformer_layers(model_runtime)),
+        blocks=model_runtime.patchers[0].blocks if model_runtime.patchers else model_runtime.trunk.blocks,
         n_heads=n_heads,
-        moe_expert_count=0,
         dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
     )
     patcher_model.load_state_dict(patcher_state)
@@ -435,26 +433,15 @@ class _TrainPatcherModel(nn.Module):
         max_seq_len: int,
         use_vocab_embedding: bool,
         use_positional_embedding: bool,
-        transformer_layers: int,
+        blocks: list[Any],
         n_heads: int,
-        moe_expert_count: int,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.vocab_embedding = nn.Embedding(vocab_size, d_model) if use_vocab_embedding else None
         self.token_projection = nn.Linear(1, d_model) if not use_vocab_embedding else None
         self.positional_embedding = nn.Embedding(max_seq_len, d_model) if use_positional_embedding else None
-        self.layers = nn.ModuleList(
-            [
-                _TransformerDecoderBlock(
-                    d_model=d_model,
-                    n_heads=n_heads,
-                    moe_expert_count=moe_expert_count,
-                    dropout=dropout,
-                )
-                for _ in range(transformer_layers)
-            ]
-        )
+        self.layers = _compile_decoder_layers(blocks=blocks, fallback_d_model=d_model, fallback_n_heads=n_heads, dropout=dropout)
         self.norm = nn.LayerNorm(d_model)
         self.latent_dim = d_model
         self.latent_head = nn.Linear(d_model, self.latent_dim)
@@ -482,7 +469,10 @@ class _TrainPatcherModel(nn.Module):
         seq_len = encoded_inputs.shape[1]
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=encoded_inputs.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
-            x = layer(x, causal_mask)
+            if isinstance(layer, _TransformerDecoderBlock):
+                x = layer(x, causal_mask)
+            else:
+                x = layer(x)
         x = self.norm(x)
         return self.latent_head(x)
 
@@ -501,24 +491,14 @@ class _TrainTrunkModel(nn.Module):
         self,
         d_model: int,
         use_positional_embedding: bool,
-        transformer_layers: int,
+        blocks: list[Any],
         n_heads: int,
-        moe_expert_count: int,
+        max_seq_len: int,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        self.positional_embedding = nn.Embedding(4096, d_model) if use_positional_embedding else None
-        self.layers = nn.ModuleList(
-            [
-                _TransformerDecoderBlock(
-                    d_model=d_model,
-                    n_heads=n_heads,
-                    moe_expert_count=moe_expert_count,
-                    dropout=dropout,
-                )
-                for _ in range(transformer_layers)
-            ]
-        )
+        self.positional_embedding = nn.Embedding(max_seq_len, d_model) if use_positional_embedding else None
+        self.layers = _compile_decoder_layers(blocks=blocks, fallback_d_model=d_model, fallback_n_heads=n_heads, dropout=dropout)
         self.norm = nn.LayerNorm(d_model)
         self.latent_dim = d_model
         self.latent_head = nn.Linear(d_model, self.latent_dim)
@@ -532,7 +512,10 @@ class _TrainTrunkModel(nn.Module):
         seq_len = x.shape[1]
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
-            x = layer(x, causal_mask)
+            if isinstance(layer, _TransformerDecoderBlock):
+                x = layer(x, causal_mask)
+            else:
+                x = layer(x)
         x = self.norm(x)
         return self.latent_head(x)
 
@@ -570,6 +553,73 @@ class _TransformerDecoderBlock(nn.Module):
         else:
             ffn_out = self.ffn(ffn_input)
         return x + self.ffn_dropout(ffn_out)
+
+
+class _TrainRoPE(nn.Module):
+    def __init__(self, base: float, scale: float) -> None:
+        super().__init__()
+        self.base = base
+        self.scale = scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] < 2:
+            return x
+        even = x[..., 0::2]
+        odd = x[..., 1::2]
+        angle = (1.0 / self.base) * self.scale
+        cos = torch.cos(torch.tensor(angle, dtype=x.dtype, device=x.device))
+        sin = torch.sin(torch.tensor(angle, dtype=x.dtype, device=x.device))
+        out = x.clone()
+        out[..., 0::2] = even * cos - odd * sin
+        out[..., 1::2] = even * sin + odd * cos
+        return out
+
+
+class _TrainDRope(nn.Module):
+    def __init__(self, base: float, scale: float) -> None:
+        super().__init__()
+        self.base = base
+        self.scale = scale
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        decay = 1.0 / (1.0 + (self.scale / self.base))
+        positions = torch.arange(x.shape[1], device=x.device, dtype=x.dtype)
+        mask = torch.exp(-positions * (1.0 - decay)).view(1, -1, 1)
+        return x * mask
+
+
+def _compile_decoder_layers(blocks: list[Any], fallback_d_model: int, fallback_n_heads: int, dropout: float) -> nn.ModuleList:
+    layers: list[nn.Module] = []
+    for block in blocks:
+        if isinstance(block, (TransformerBlock, CrossAttentionBlock)):
+            layers.append(
+                _TransformerDecoderBlock(
+                    d_model=getattr(block, "d_model", fallback_d_model),
+                    n_heads=getattr(block, "n_heads", fallback_n_heads),
+                    moe_expert_count=0,
+                    dropout=dropout,
+                )
+            )
+        elif isinstance(block, MixOfExpertsBlock):
+            expert_count = max(0, len(block.experts))
+            layers.append(
+                _TransformerDecoderBlock(
+                    d_model=fallback_d_model,
+                    n_heads=fallback_n_heads,
+                    moe_expert_count=expert_count,
+                    dropout=dropout,
+                )
+            )
+        elif isinstance(block, LayerNormBlock):
+            layers.append(nn.LayerNorm(fallback_d_model, eps=block.eps))
+        elif isinstance(block, RoPEBlock):
+            layers.append(_TrainRoPE(base=block.base, scale=block.scale))
+        elif isinstance(block, DRopeBlock):
+            layers.append(_TrainDRope(base=block.base, scale=block.scale))
+        elif isinstance(block, PosEmbeddingBlock):
+            continue
+
+    return nn.ModuleList(layers)
 
 
 def _masked_token_cross_entropy(logits: torch.Tensor, target_ids: torch.Tensor, pad_id: int) -> torch.Tensor:
