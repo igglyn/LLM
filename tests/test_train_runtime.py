@@ -154,7 +154,7 @@ def test_patcher_encoder_and_decoder_compile_layers_from_patcher_blocks() -> Non
 
     decoder = _PatcherDecoder(
         d_model=16,
-        vocab_size=256,
+        output_dim=256,
         blocks=patcher_blocks,
         n_heads=4,
     )
@@ -180,7 +180,7 @@ def test_patcher_encoder_and_decoder_do_not_share_parameters() -> None:
     )
     decoder = _PatcherDecoder(
         d_model=16,
-        vocab_size=128,
+        output_dim=128,
         blocks=blocks,
         n_heads=4,
     )

@@ -81,39 +81,45 @@ def train_model(
     trunk_loss_thresholds = _loss_threshold_schedulers(model_runtime.trunk.train_config.schedulers, total_steps=steps)
     trunk_lr_multiplier = 1.0
 
-    patcher_train_config = model_runtime.patchers[0].train_config if model_runtime.patchers else model_runtime.trunk.train_config
-    patcher_blocks = model_runtime.patchers[0].blocks if model_runtime.patchers else model_runtime.trunk.blocks
-    patcher_encoder = _PatcherEncoder(
-        d_model=d_model,
-        vocab_size=vocab_size,
-        max_seq_len=max_seq_len,
-        use_vocab_embedding=has_vocab_embedding,
-        use_positional_embedding=has_pos_embedding,
-        blocks=patcher_blocks,
-        n_heads=n_heads,
-        dropout=patcher_train_config.dropout,
-    )
-    patcher_encoder = patcher_encoder.to(configured_device)
+    patchers = model_runtime.patchers if model_runtime.patchers else [model_runtime.trunk]
+    patcher_train_config = patchers[0].train_config
+    patcher_encoders: list[_PatcherEncoder] = []
+    patcher_decoders: list[_PatcherDecoder] = []
+    patch_sizes: list[int] = []
+    for idx, patcher in enumerate(patchers):
+        patcher_encoders.append(
+            _PatcherEncoder(
+                d_model=d_model,
+                vocab_size=vocab_size,
+                max_seq_len=max_seq_len,
+                use_vocab_embedding=has_vocab_embedding and idx == 0,
+                use_positional_embedding=has_pos_embedding,
+                blocks=patcher.blocks,
+                n_heads=n_heads,
+                dropout=patcher.train_config.dropout,
+            ).to(configured_device)
+        )
+        patcher_decoders.append(
+            _PatcherDecoder(
+                d_model=d_model,
+                output_dim=vocab_size if idx == 0 else d_model,
+                blocks=patcher.blocks,
+                n_heads=n_heads,
+                dropout=patcher.train_config.dropout,
+            ).to(configured_device)
+        )
+        patch_sizes.append(max(1, getattr(patcher, 'patch_size', 1)))
 
-    patcher_decoder = _PatcherDecoder(
-        d_model=d_model,
-        vocab_size=vocab_size,
-        blocks=patcher_blocks,
-        n_heads=n_heads,
-        dropout=patcher_train_config.dropout,
-    )
-    patcher_decoder = patcher_decoder.to(configured_device)
-
-    encoder_param_ids = {id(param) for param in patcher_encoder.parameters()}
-    decoder_param_ids = {id(param) for param in patcher_decoder.parameters()}
+    encoder_param_ids = {id(param) for encoder in patcher_encoders for param in encoder.parameters()}
+    decoder_param_ids = {id(param) for decoder in patcher_decoders for param in decoder.parameters()}
     if encoder_param_ids & decoder_param_ids:
         raise ValueError("patcher encoder and decoder must not share parameters")
 
     patcher_optimizer = _build_optimizer(
         optimizer_type=patcher_train_config.optimizer_type,
         parameters=[
-            {"params": patcher_encoder.parameters(), "name": "patcher_encoder"},
-            {"params": patcher_decoder.parameters(), "name": "patcher_decoder"},
+            {"params": [param for encoder in patcher_encoders for param in encoder.parameters()], "name": "patcher_encoder"},
+            {"params": [param for decoder in patcher_decoders for param in decoder.parameters()], "name": "patcher_decoder"},
         ],
         weight_decay=patcher_train_config.weight_decay,
     )
@@ -126,8 +132,8 @@ def train_model(
         start_step = _resume_training_state(
             trunk_model=trunk_model,
             trunk_optimizer=trunk_optimizer,
-            patcher_encoder=patcher_encoder,
-            patcher_decoder=patcher_decoder,
+            patcher_encoders=patcher_encoders,
+            patcher_decoders=patcher_decoders,
             patcher_optimizer=patcher_optimizer,
             checkpoint_file=resume_from,
             training_device=configured_device,
@@ -170,33 +176,55 @@ def train_model(
         if patcher_skip_step:
             patcher_loss = torch.tensor(0.0, device=configured_device)
         else:
-            patcher_latents_for_reconstruction = patcher_encoder(patcher_input_ids)
-            patcher_logits = patcher_decoder(patcher_latents_for_reconstruction)
-            patcher_loss = _masked_token_cross_entropy(
-                logits=patcher_logits,
-                target_ids=patcher_input_ids,
-                pad_id=token_to_id["<pad>"],
-            )
-            patcher_optimizer.zero_grad()
-            patcher_loss.backward()
-            if patcher_train_config.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_([*patcher_encoder.parameters(), *patcher_decoder.parameters()], patcher_train_config.grad_clip)
-            patcher_optimizer.step()
+            pair_losses: list[torch.Tensor] = []
+            patcher_input: torch.Tensor = patcher_input_ids
+            for idx, (encoder, decoder, patch_size) in enumerate(zip(patcher_encoders, patcher_decoders, patch_sizes)):
+                patcher_optimizer.zero_grad()
+                token_latents = encoder(patcher_input)
+                patch_latents = _pool_patch_latents(token_latents, patch_size=patch_size, include_incomplete_tail=True)
+                expanded_patch_latents = _expand_patch_latents(patch_latents, patch_size=patch_size, target_len=token_latents.shape[1])
+                decoded = decoder(expanded_patch_latents)
+                if idx == 0:
+                    pair_loss = _masked_token_cross_entropy(
+                        logits=decoded,
+                        target_ids=patcher_input_ids,
+                        pad_id=token_to_id["<pad>"],
+                    )
+                else:
+                    pair_loss = _masked_latent_mse(decoded, patcher_input)
+
+                pair_loss.backward()
+                if patcher_train_config.grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_([
+                        *encoder.parameters(),
+                        *decoder.parameters(),
+                    ], patcher_train_config.grad_clip)
+                patcher_optimizer.step()
+                pair_losses.append(pair_loss.detach())
+                patcher_input = patch_latents.detach()
+
+            if pair_losses:
+                patcher_loss = torch.stack(pair_losses).mean()
+            else:
+                patcher_loss = torch.tensor(0.0, device=configured_device)
 
         if trunk_skip_step:
             next_patch_loss = torch.tensor(0.0, device=configured_device)
         else:
             trunk_optimizer.zero_grad()
             with torch.no_grad():
-                patcher_latents = patcher_encoder(trunk_input_ids)
-            patch_input_latents, patch_target_latents = _next_patch_latent_batch(
-                patcher_latents=patcher_latents,
-                patch_size=max(1, model_runtime.patchers[0].patch_size) if model_runtime.patchers else 1,
-            )
-            if patch_input_latents.shape[1] == 0:
+                patch_sequence = _encode_patcher_stack(
+                    encoders=patcher_encoders,
+                    patch_sizes=patch_sizes,
+                    model_input=trunk_input_ids,
+                    include_incomplete_tail=False,
+                )
+            context_window = max(1, model_runtime.trunk.context)
+            patch_input_latents, patch_target_latents = _context_patch_prediction_batch(patch_sequence, context=context_window)
+            if patch_input_latents.shape[0] == 0:
                 next_patch_loss = torch.tensor(0.0, device=configured_device)
             else:
-                predicted_patch_latents = trunk_model(patch_input_latents)
+                predicted_patch_latents = trunk_model(patch_input_latents)[:, -1, :]
                 next_patch_loss = _masked_latent_mse(
                     predicted_latents=predicted_patch_latents,
                     target_latents=patch_target_latents,
@@ -248,8 +276,10 @@ def train_model(
                 {
                     "model_state": trunk_model.state_dict(),
                     "optimizer_state": trunk_optimizer.state_dict(),
-                    "patcher_encoder_state": patcher_encoder.state_dict(),
-                    "patcher_decoder_state": patcher_decoder.state_dict(),
+                    "patcher_encoder_state": patcher_encoders[0].state_dict(),
+                    "patcher_decoder_state": patcher_decoders[0].state_dict(),
+                    "patcher_encoder_stack_state": [encoder.state_dict() for encoder in patcher_encoders],
+                    "patcher_decoder_stack_state": [decoder.state_dict() for decoder in patcher_decoders],
                     "patcher_optimizer_state": patcher_optimizer.state_dict(),
                     "step": step + 1,
                     "loss": detached_loss,
@@ -264,8 +294,10 @@ def train_model(
     torch.save(
         {
             "model_state": trunk_model.state_dict(),
-            "patcher_encoder_state": patcher_encoder.state_dict(),
-            "patcher_decoder_state": patcher_decoder.state_dict(),
+            "patcher_encoder_state": patcher_encoders[0].state_dict(),
+            "patcher_decoder_state": patcher_decoders[0].state_dict(),
+            "patcher_encoder_stack_state": [encoder.state_dict() for encoder in patcher_encoders],
+            "patcher_decoder_stack_state": [decoder.state_dict() for decoder in patcher_decoders],
             "meta": {
                 "vocab_size": vocab_size,
                 "d_model": d_model,
@@ -293,7 +325,8 @@ def train_model(
                 "prediction_target": "patch_latent_next_state_mse_plus_patcher_reconstruction",
                 "latent_dim": trunk_model.latent_dim,
                 "decoder_head": "patcher_decoder_for_reconstruction_only",
-                "patch_size": max(1, model_runtime.patchers[0].patch_size) if model_runtime.patchers else 1,
+                "patch_size": patch_sizes[0],
+                "patch_sizes": patch_sizes,
             },
         },
         weights_file,
@@ -386,6 +419,7 @@ def run_trained_model(
 
     patcher_encoder_state = payload.get("patcher_encoder_state")
     patcher_decoder_state = payload.get("patcher_decoder_state")
+    patcher_encoder_stack_state = payload.get("patcher_encoder_stack_state")
     if not isinstance(patcher_encoder_state, dict):
         raise ValueError(f"weights file is missing patcher_encoder_state: {weights_file}")
     if not isinstance(patcher_decoder_state, dict):
@@ -404,7 +438,7 @@ def run_trained_model(
     patcher_encoder.eval()
 
     patcher_decoder = _PatcherDecoder(
-        vocab_size=vocab_size,
+        output_dim=vocab_size,
         d_model=d_model,
         blocks=model_runtime.patchers[0].blocks if model_runtime.patchers else model_runtime.trunk.blocks,
         n_heads=n_heads,
@@ -413,26 +447,47 @@ def run_trained_model(
     patcher_decoder.load_state_dict(patcher_decoder_state)
     patcher_decoder.eval()
 
+    patcher_encoders = [patcher_encoder]
+    patch_sizes = [int(meta.get("patch_size", 1))]
+    if isinstance(patcher_encoder_stack_state, list) and len(patcher_encoder_stack_state) == len(model_runtime.patchers):
+        patcher_encoders = []
+        patch_sizes = []
+        for idx, patcher in enumerate(model_runtime.patchers):
+            encoder = _PatcherEncoder(
+                vocab_size=vocab_size,
+                d_model=d_model,
+                max_seq_len=max_seq_len,
+                use_vocab_embedding=use_vocab_embedding and idx == 0,
+                use_positional_embedding=use_positional_embedding,
+                blocks=patcher.blocks,
+                n_heads=n_heads,
+                dropout=float(meta.get("dropout", model_runtime.trunk.train_config.dropout)),
+            )
+            encoder.load_state_dict(patcher_encoder_stack_state[idx])
+            encoder.eval()
+            patcher_encoders.append(encoder)
+            patch_sizes.append(max(1, patcher.patch_size))
+
     encoded = _encode_texts([text], {str(k): int(v) for k, v in token_to_id.items()}, max_tokens=max_seq_len)[0]
     pad_id = int(meta.get("pad_id", 0))
 
-    patch_size = int(meta.get("patch_size", 1))
     generated_ids: list[int] = []
     generated_scores: list[float] = []
     for _ in range(max(0, max_new_tokens)):
         window = encoded[-max_seq_len:]
         input_ids, _ = _next_token_batch([window], pad_id=pad_id)
-        patch_latents = patcher_encoder(input_ids)
-        patch_sequence = _pool_patch_latents(
-            patch_latents,
-            patch_size,
+        patch_sequence = _encode_patcher_stack(
+            encoders=patcher_encoders,
+            patch_sizes=patch_sizes,
+            model_input=input_ids,
             include_incomplete_tail=True,
         )
         if patch_sequence.shape[1] == 0:
             break
-        patch_input = patch_sequence[:, -1:, :]
+        context = max(1, int(meta.get("context_limit", model_runtime.trunk.context)))
+        patch_input = patch_sequence[:, -context:, :]
         with torch.no_grad():
-            predicted_patch = model(patch_input)
+            predicted_patch = model(patch_input)[:, -1:, :]
             logits = patcher_decoder(predicted_patch)
 
         next_token_logits = logits[0, -1]
@@ -497,7 +552,7 @@ class _PatcherEncoder(nn.Module):
         return x
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        x = self._encode_tokens(input_ids)
+        x = input_ids if input_ids.dtype.is_floating_point else self._encode_tokens(input_ids)
         seq_len = x.shape[1]
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
         for layer in self.layers:
@@ -513,7 +568,7 @@ class _PatcherDecoder(nn.Module):
     def __init__(
         self,
         d_model: int,
-        vocab_size: int,
+        output_dim: int,
         blocks: list[Any],
         n_heads: int,
         dropout: float = 0.0,
@@ -521,7 +576,7 @@ class _PatcherDecoder(nn.Module):
         super().__init__()
         self.layers = _compile_decoder_layers(blocks=blocks, fallback_d_model=d_model, fallback_n_heads=n_heads, dropout=dropout)
         self.norm = nn.LayerNorm(d_model)
-        self.head = nn.Linear(d_model, vocab_size)
+        self.head = nn.Linear(d_model, output_dim)
 
     def forward(self, latents: torch.Tensor) -> torch.Tensor:
         x = latents
@@ -777,8 +832,8 @@ def _is_offset_step(schedulers: list[RuntimeSchedulerConfig], step: int) -> bool
 def _resume_training_state(
     trunk_model: nn.Module,
     trunk_optimizer: torch.optim.Optimizer,
-    patcher_encoder: nn.Module,
-    patcher_decoder: nn.Module,
+    patcher_encoders: list[nn.Module],
+    patcher_decoders: list[nn.Module],
     patcher_optimizer: torch.optim.Optimizer,
     checkpoint_file: str,
     training_device: str,
@@ -793,10 +848,24 @@ def _resume_training_state(
 
     patcher_encoder_state = payload.get("patcher_encoder_state")
     patcher_decoder_state = payload.get("patcher_decoder_state")
+    patcher_encoder_stack_state = payload.get("patcher_encoder_stack_state")
+    patcher_decoder_stack_state = payload.get("patcher_decoder_stack_state")
     patcher_optimizer_state = payload.get("patcher_optimizer_state")
-    if isinstance(patcher_encoder_state, dict) and isinstance(patcher_decoder_state, dict) and isinstance(patcher_optimizer_state, dict):
-        patcher_encoder.load_state_dict(patcher_encoder_state)
-        patcher_decoder.load_state_dict(patcher_decoder_state)
+    if (
+        isinstance(patcher_encoder_stack_state, list)
+        and isinstance(patcher_decoder_stack_state, list)
+        and len(patcher_encoder_stack_state) == len(patcher_encoders)
+        and len(patcher_decoder_stack_state) == len(patcher_decoders)
+        and isinstance(patcher_optimizer_state, dict)
+    ):
+        for encoder, state in zip(patcher_encoders, patcher_encoder_stack_state):
+            encoder.load_state_dict(state)
+        for decoder, state in zip(patcher_decoders, patcher_decoder_stack_state):
+            decoder.load_state_dict(state)
+        patcher_optimizer.load_state_dict(patcher_optimizer_state)
+    elif isinstance(patcher_encoder_state, dict) and isinstance(patcher_decoder_state, dict) and isinstance(patcher_optimizer_state, dict):
+        patcher_encoders[0].load_state_dict(patcher_encoder_state)
+        patcher_decoders[0].load_state_dict(patcher_decoder_state)
         patcher_optimizer.load_state_dict(patcher_optimizer_state)
 
     return int(payload.get("step", 0))
@@ -967,6 +1036,39 @@ def _pool_patch_latents(
         pooled = torch.cat([pooled, patcher_latents[:, -1:, :]], dim=1)
     return pooled
 
+
+
+
+def _expand_patch_latents(patch_latents: torch.Tensor, patch_size: int, target_len: int) -> torch.Tensor:
+    expanded = patch_latents.repeat_interleave(max(1, patch_size), dim=1)
+    if expanded.shape[1] < target_len:
+        pad = expanded[:, -1:, :].expand(-1, target_len - expanded.shape[1], -1) if expanded.shape[1] > 0 else torch.zeros(patch_latents.shape[0], target_len, patch_latents.shape[2], device=patch_latents.device, dtype=patch_latents.dtype)
+        expanded = torch.cat([expanded, pad], dim=1)
+    return expanded[:, :target_len, :]
+
+
+def _context_patch_prediction_batch(patch_sequence: torch.Tensor, context: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if patch_sequence.shape[1] <= context:
+        empty = patch_sequence[:, :0, :]
+        return empty, empty
+    inputs = []
+    targets = []
+    for b in range(patch_sequence.shape[0]):
+        for t in range(context, patch_sequence.shape[1]):
+            inputs.append(patch_sequence[b, t - context : t, :])
+            targets.append(patch_sequence[b, t, :])
+    if not inputs:
+        empty = patch_sequence[:, :0, :]
+        return empty, empty
+    return torch.stack(inputs, dim=0), torch.stack(targets, dim=0)
+
+
+def _encode_patcher_stack(encoders: list[_PatcherEncoder], patch_sizes: list[int], model_input: torch.Tensor, include_incomplete_tail: bool = False) -> torch.Tensor:
+    encoded: torch.Tensor = model_input
+    for encoder, patch_size in zip(encoders, patch_sizes):
+        token_latents = encoder(encoded)
+        encoded = _pool_patch_latents(token_latents, patch_size=patch_size, include_incomplete_tail=include_incomplete_tail)
+    return encoded
 
 def _next_patch_latent_batch(patcher_latents: torch.Tensor, patch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     patch_sequence = _pool_patch_latents(patcher_latents, patch_size)
