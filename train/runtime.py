@@ -389,7 +389,11 @@ def run_trained_model(
         window = encoded[-max_seq_len:]
         input_ids, _ = _next_token_batch([window], pad_id=pad_id)
         patch_latents = patcher_model.encode_patch_latents(input_ids)
-        patch_sequence = _pool_patch_latents(patch_latents, patch_size)
+        patch_sequence = _pool_patch_latents(
+            patch_latents,
+            patch_size,
+            include_incomplete_tail=True,
+        )
         if patch_sequence.shape[1] == 0:
             break
         patch_input = patch_sequence[:, -1:, :]
@@ -902,9 +906,16 @@ def _next_token_batch(sequences: list[list[int]], pad_id: int) -> tuple[torch.Te
     return input_ids, target_ids
 
 
-def _pool_patch_latents(patcher_latents: torch.Tensor, patch_size: int) -> torch.Tensor:
+def _pool_patch_latents(
+    patcher_latents: torch.Tensor,
+    patch_size: int,
+    include_incomplete_tail: bool = False,
+) -> torch.Tensor:
     step = max(1, patch_size)
-    return patcher_latents[:, step - 1 :: step, :]
+    pooled = patcher_latents[:, step - 1 :: step, :]
+    if include_incomplete_tail and patcher_latents.shape[1] > 0 and patcher_latents.shape[1] % step != 0:
+        pooled = torch.cat([pooled, patcher_latents[:, -1:, :]], dim=1)
+    return pooled
 
 
 def _next_patch_latent_batch(patcher_latents: torch.Tensor, patch_size: int) -> tuple[torch.Tensor, torch.Tensor]:

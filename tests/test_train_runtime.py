@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from shared.config import parse_config, resolve_config
 from train.blocks import DRopeBlock, MixOfExpertsBlock, PosEmbeddingBlock, RoPEBlock, TransformerBlock
 from train.builder import build_model_runtime
@@ -14,6 +16,7 @@ from train.runtime import (
     _TransformerDecoderBlock,
     _apply_loss_threshold_decay,
     _is_offset_step,
+    _pool_patch_latents,
 )
 from train.specs import RuntimeSchedulerConfig
 
@@ -151,3 +154,19 @@ def test_train_patcher_compiles_layers_from_patcher_blocks() -> None:
     assert len(model.layers) == len([b for b in patcher_blocks if b.block_name != "PosEmbedding"])
     assert isinstance(model.layers[0], _TrainRoPE)
     assert isinstance(model.layers[1], _TransformerDecoderBlock)
+
+
+def test_pool_patch_latents_ignores_incomplete_tail_by_default() -> None:
+    latents = torch.arange(1 * 5 * 2, dtype=torch.float32).reshape(1, 5, 2)
+    pooled = _pool_patch_latents(latents, patch_size=2)
+
+    assert pooled.shape[1] == 2
+    assert torch.equal(pooled, latents[:, [1, 3], :])
+
+
+def test_pool_patch_latents_can_include_incomplete_tail_for_generation() -> None:
+    latents = torch.arange(1 * 5 * 2, dtype=torch.float32).reshape(1, 5, 2)
+    pooled = _pool_patch_latents(latents, patch_size=2, include_incomplete_tail=True)
+
+    assert pooled.shape[1] == 3
+    assert torch.equal(pooled, latents[:, [1, 3, 4], :])
