@@ -53,7 +53,7 @@ def test_trunk_forward_order(tmp_path: Path) -> None:
         "RoPE(d_model=1024,n_heads=8,base=12000.0,scale=0.75)",
         "PosEmbedding",
         "DRope(d_model=1024,n_heads=8,base=8000.0,scale=1.25)",
-        "MoERoute(moe1->expert_b)",
+        "MoE(moe1,experts=2,top_k=2)",
     ]
 
 
@@ -74,7 +74,8 @@ def test_smoke_forward_dummy(tmp_path: Path) -> None:
     assert out.tensor is not None
     assert not torch.allclose(out.tensor, initial)
     assert "TrunkEnd(t1)" in out.execution_trace
-    assert out.moe_metrics["moe1"]["route_calls"] == 1
+    assert out.moe_metrics["moe1"]["num_experts"] == 2
+    assert out.moe_metrics["moe1"]["top_k"] == 2
 
 
 
@@ -120,7 +121,7 @@ def test_vocab_embedding_runtime_trace(tmp_path: Path) -> None:
     runtime = build_model_runtime(resolve_config(parse_config(path)))
     trace = runtime.smoke("hello").execution_trace
 
-    assert "VocabEmbedding(vocab_size=50000)" in trace
+    assert "VocabEmbedding(vocab_size=50000,d_model=128)" in trace
 
 def test_scheduler_ordering_preserved_and_summarized(tmp_path: Path) -> None:
     runtime = _build_runtime(tmp_path)

@@ -37,6 +37,24 @@ def _transformer_layers(attributes: dict[str, str], context: str) -> int:
     return layers
 
 
+def _vocab_embedding_d_model(attributes: dict[str, str], context: str, container: ResolvedPatcherSpec | ResolvedTrunkSpec) -> int:
+    raw_d_model = attributes.get("d_model")
+    if raw_d_model is not None:
+        try:
+            d_model = int(raw_d_model)
+        except ValueError as exc:
+            raise ValueError(f"{context} has invalid VocabEmbedding d_model='{raw_d_model}'.") from exc
+        if d_model <= 0:
+            raise ValueError(f"{context} must declare VocabEmbedding d_model > 0 (got {d_model}).")
+        return d_model
+
+    for block in [*container.transformer_blocks, *container.cross_attention_blocks, *container.rope_blocks]:
+        if block.d_model > 0:
+            return block.d_model
+
+    raise ValueError(f"{context} includes VocabEmbedding but no d_model can be inferred; set VocabEmbedding d_model explicitly.")
+
+
 def _build_patcher_runtime(patcher: ResolvedPatcherSpec) -> PatcherRuntime:
     return PatcherRuntime(
         name=patcher.name,
@@ -84,7 +102,12 @@ def _compose_patcher_blocks(patcher: ResolvedPatcherSpec) -> list[RuntimeBlock]:
         elif block_name == "VocabEmbedding":
             block = patcher.vocab_embedding_blocks[indexes[block_name]]
             indexes[block_name] += 1
-            blocks.append(VocabEmbeddingBlock(vocab_size=block.vocab_size))
+            blocks.append(
+                VocabEmbeddingBlock(
+                    vocab_size=block.vocab_size,
+                    d_model=_vocab_embedding_d_model(block.attributes, f"Patcher '{patcher.name}'", patcher),
+                )
+            )
         elif block_name == "LayerNorm":
             block = patcher.layer_norm_blocks[indexes[block_name]]
             indexes[block_name] += 1
@@ -121,7 +144,12 @@ def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
         elif block_name == "VocabEmbedding":
             block = trunk.vocab_embedding_blocks[indexes[block_name]]
             indexes[block_name] += 1
-            blocks.append(VocabEmbeddingBlock(vocab_size=block.vocab_size))
+            blocks.append(
+                VocabEmbeddingBlock(
+                    vocab_size=block.vocab_size,
+                    d_model=_vocab_embedding_d_model(block.attributes, f"Trunk '{trunk.name}'", trunk),
+                )
+            )
         elif block_name == "DRope":
             block = trunk.drope_blocks[indexes[block_name]]
             indexes[block_name] += 1
@@ -146,6 +174,15 @@ def _compose_trunk_blocks(trunk: ResolvedTrunkSpec) -> list[RuntimeBlock]:
     return blocks
 
 
+
+
+def _moe_d_model(moe: ResolvedMixOfExpertsSpec) -> int:
+    for expert in moe.experts:
+        for block in [*expert.transformer_blocks, *expert.cross_attention_blocks]:
+            if block.d_model > 0:
+                return block.d_model
+    raise ValueError(f"MixOfExperts '{moe.name}' has no expert block with d_model; define at least one Transformer/CrossAttention block.")
+
 def _build_moe_runtime(moe: ResolvedMixOfExpertsSpec) -> MixOfExpertsBlock:
     experts: list[ExpertRuntime] = []
     for expert in moe.experts:
@@ -167,4 +204,4 @@ def _build_moe_runtime(moe: ResolvedMixOfExpertsSpec) -> MixOfExpertsBlock:
                 raise ValueError(f"Unsupported expert child block '{block_name}'.")
         experts.append(ExpertRuntime(name=expert.name, blocks=expert_blocks))
 
-    return MixOfExpertsBlock(name=moe.name, experts=experts)
+    return MixOfExpertsBlock(name=moe.name, experts=experts, d_model=_moe_d_model(moe))
