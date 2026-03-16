@@ -9,7 +9,7 @@ from train.specs import RuntimeState
 from .rope import RoPEModule
 
 
-class DroPEModule(nn.Module):
+class DRopeModule(nn.Module):
     def __init__(self, d_model: int, n_heads: int, base: float = 10000.0, scale: float = 1.0, max_seq_len: int = 4096):
         super().__init__()
         self.rope = RoPEModule(d_model, n_heads, base, scale, max_seq_len)
@@ -25,7 +25,7 @@ class DroPEModule(nn.Module):
 
 
 @dataclass(frozen=True)
-class DroPEBlock:
+class DRopeBlock:
     d_model: int
     n_heads: int
     base: float = 10000.0
@@ -33,10 +33,10 @@ class DroPEBlock:
 
     @property
     def block_name(self) -> str:
-        return "DroPE"
+        return "DRope"
 
-    def build(self) -> DroPEModule:
-        return DroPEModule(
+    def build(self) -> DRopeModule:
+        return DRopeModule(
             d_model=self.d_model,
             n_heads=self.n_heads,
             base=self.base,
@@ -47,8 +47,12 @@ class DroPEBlock:
         tensor = state.tensor
         return RuntimeState(
             text=state.text,
-            execution_trace=[*state.execution_trace, f"DroPE(d_model={self.d_model},n_heads={self.n_heads},base={self.base},scale={self.scale})"],
+            execution_trace=[*state.execution_trace, f"DRope(d_model={self.d_model},n_heads={self.n_heads},base={self.base},scale={self.scale})"],
             moe_metrics=dict(state.moe_metrics),
             tensor_shape=tuple(tensor.shape) if tensor is not None else state.tensor_shape,
             tensor=tensor,
         )
+
+
+# Backward-compatible alias for older call sites.
+DroPEBlock = DRopeBlock
