@@ -139,6 +139,8 @@ def main():
             if step % 20 == 0:
                 print(f"patcher_step={step} recon_loss={loss.item():.10f}")
 
+            lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, loss.item(), patcher_train, lr_reduction_state)
+
             if step % eval_every == 0 and step > 0:
                 patcher.eval(); token_emb.eval()
                 losses = []
@@ -157,7 +159,6 @@ def main():
                         {"patcher": patcher.state_dict(), "token_emb": token_emb.state_dict(), "config": cfg},
                         out_dir / "best.pt",
                     )
-                lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, val_loss, patcher_train, lr_reduction_state)
                 patcher.train(); token_emb.train()
 
             if step % save_every == 0 and step > 0:
