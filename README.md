@@ -30,6 +30,67 @@ configs/
 Any `.txt` files. Public domain books from Gutenberg work well.
 ~15MB is enough to see learning; overfitting starts around there.
 
+Fetch directly: `https://www.gutenberg.org/cache/epub/{ID}/pg{ID}.txt`
+
+Recommended IDs — varied in style, era, and prose density:
+
+**Novels / Fiction**
+- 1342  Pride and Prejudice — Austen
+- 84    Frankenstein — Shelley
+- 2701  Moby Dick — Melville
+- 98    A Tale of Two Cities — Dickens
+- 1400  Great Expectations — Dickens
+- 74    Tom Sawyer — Twain
+- 76    Huckleberry Finn — Twain
+- 1661  Sherlock Holmes (Adventures) — Doyle
+- 2852  Sherlock Holmes (Hound) — Doyle
+- 345   Dracula — Stoker
+- 1260  Jane Eyre — Brontë
+- 158   Emma — Austen
+- 768   Wuthering Heights — Brontë
+- 4300  Ulysses — Joyce
+- 2600  War and Peace — Tolstoy
+- 2554  Crime and Punishment — Dostoevsky
+- 5200  Metamorphosis — Kafka
+- 174   Picture of Dorian Gray — Wilde
+- 844   The Importance of Being Earnest — Wilde
+- 1952  The Yellow Wallpaper — Gilman
+- 219   Heart of Darkness — Conrad
+- 526   The War of the Worlds — Wells
+- 35    The Time Machine — Wells
+- 36    The Island of Doctor Moreau — Wells
+- 55    The Wizard of Oz — Baum
+- 16    Peter Pan — Barrie
+- 1184  The Count of Monte Cristo — Dumas
+- 1257  The Three Musketeers — Dumas
+
+**Essays / Philosophy / Non-fiction**
+- 2680  Meditations — Marcus Aurelius
+- 996   Don Quixote — Cervantes
+- 1080  A Modest Proposal — Swift
+- 910   Two Treatises of Government — Locke
+- 7370  Leviathan — Hobbes
+- 4705  On Liberty — Mill
+- 1635  The Republic — Plato
+- 1713  Discourse on Method — Descartes
+- 2500  Relativity — Einstein
+- 1228  The Origin of Species — Darwin
+- 3207  Autobiography of Benjamin Franklin
+
+**Drama / Poetry**
+- 100   Complete Works of Shakespeare
+- 844   The Importance of Being Earnest — Wilde
+
+**Short stories (good for diversity at small dataset sizes)**
+- 1064  Poe stories
+- 932   Fall of the House of Usher — Poe
+- 23    Narrative of Frederick Douglass
+
+**Epic / Ancient**
+- 16328 Beowulf
+- 1727  The Odyssey — Homer
+- 22    The Iliad — Homer
+
 ### 2. Prepare patcher1 data
 
 ```bash
