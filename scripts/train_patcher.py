@@ -137,7 +137,7 @@ def main():
             scaler.update()
 
             if step % 20 == 0:
-                print(f"patcher_step={step} recon_loss={loss.item():.6f}")
+                print(f"patcher_step={step} recon_loss={loss.item():.10f}")
 
             if step % eval_every == 0 and step > 0:
                 patcher.eval(); token_emb.eval()
@@ -150,7 +150,7 @@ def main():
                         if len(losses) >= int(patcher_train.get("eval_batches", 50)):
                             break
                 val_loss = float(sum(losses) / max(1, len(losses)))
-                print(f"patcher_step={step} val_recon_loss={val_loss:.6f}")
+                print(f"patcher_step={step} val_recon_loss={val_loss:.10f}")
                 if val_loss < best_val:
                     best_val = val_loss
                     torch.save(
