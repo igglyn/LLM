@@ -22,7 +22,7 @@ model:
   flash_attention: true
 
 patcher:
-  patch_size: 1
+  patch_size: 8
   latent_dim: 384
   pos_encoding: learned
   encoder_layers: 2
@@ -37,7 +37,7 @@ patcher:
 
 
 patcher2:
-  enabled: true
+  enabled: false
   patch_size: 2
   latent_dim: 384
   pos_encoding: learned
@@ -86,7 +86,7 @@ patcher_train:
   lr_reduce_factor_2: 0.5
   lr_min: 0.000001
   out_dir: outputs/patcher
-  amp_enabled: true
+  amp_enabled: false
   amp_dtype: float16
 
 train:
