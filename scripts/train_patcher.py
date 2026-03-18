@@ -86,8 +86,11 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
     seq_len = _token_seq_len_from_cfg(cfg)
     patch_size = int(cfg.get("patcher", {}).get("patch_size", getattr(tokenizer, "patch_size", 1)))
     d_model = int(model_cfg["d_model"])
+    model_dtype = {"float32": torch.float32, "float64": torch.float64, "float16": torch.float16}.get(
+        str(model_cfg.get("model_dtype", "float32")), torch.float32
+    )
 
-    emb = torch.nn.Embedding(tokenizer.vocab_len, d_model).to(device)
+    emb = torch.nn.Embedding(tokenizer.vocab_len, d_model).to(device=device, dtype=model_dtype)
     patcher = PatcherAutoencoder(
         in_dim=d_model,
         latent_dim=int(patcher_cfg.get("latent_dim", d_model)),
@@ -103,7 +106,8 @@ def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: t
         flash_attention=bool(patcher_cfg.get("flash_attention", True)),
         block_attention=bool(patcher_cfg.get("block_attention", False)),
         block_size=int(patcher_cfg.get("block_size", 8)),
-    ).to(device)
+    ).to(device=device, dtype=model_dtype)
+    print(f"Patcher model dtype: {model_dtype}")
     return emb, patcher
 
 
@@ -230,7 +234,7 @@ def main():
             if oom_tracker is not None:
                 if oom_tracker.update(loss.item()):
                     optimizer.reset_slow_ema()
-                    print(f"patcher_step={step} slow EMA reset (envelope crossed OOM {oom_tracker.last_oom})")
+                    print(f"patcher_step={step} slow EMA reset (envelope crossed OOM {oom_tracker.last_oom_bucket})")
 
             lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, loss.item(), patcher_train, lr_reduction_state)
 

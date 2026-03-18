@@ -38,7 +38,7 @@ class HiddenCausalDataset(Dataset):
             raise ValueError("Hidden cache and token stream length mismatch")
         if hidden.shape[0] <= seq_len:
             raise ValueError("Not enough cached hidden states for sequence length")
-        self.hidden = torch.from_numpy(np.asarray(hidden, dtype=np.float32))
+        self.hidden = torch.from_numpy(np.asarray(hidden, dtype=hidden.dtype))
         self.tokens = torch.from_numpy(np.asarray(tokens, dtype=np.int64))
         self.seq_len = seq_len
 
@@ -144,7 +144,9 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher2_block_size=int(cfg.get("patcher2", {}).get("block_size", 8)),
         trunk_block_attention=bool(model_cfg.get("block_attention", False)),
         trunk_block_size=int(model_cfg.get("block_size", 8)),
-    ).to(device)
+    ).to(device=device, dtype={"float32": torch.float32, "float64": torch.float64, "float16": torch.float16}.get(
+        str(model_cfg.get("model_dtype", "float32")), torch.float32
+    ))
 
 
 def _maybe_load_pretrained_patcher(model: TinyPatchLM, cfg: dict, device: torch.device) -> None:
@@ -249,7 +251,14 @@ def main():
     processed_dir = _resolve_processed_dir(cfg)
     if not bool(cfg.get("patcher2", {}).get("enabled", True)):
         print(f"patcher2 disabled; using token dataset from {processed_dir}")
-    tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
+
+    tokenizer_path = processed_dir / "tokenizer.json"
+    if not tokenizer_path.exists():
+        tokenizer_path = Path(cfg["data"]["processed_dir_patcher"]) / "tokenizer.json"
+        if not tokenizer_path.exists():
+            raise FileNotFoundError("tokenizer.json not found in tiny or patcher processed dirs")
+        print(f"tokenizer.json not in tiny dir, loading from patcher dir")
+    tokenizer = FixedPatchTokenizer.load(tokenizer_path)
 
     seq_len = _token_seq_len_from_cfg(cfg)
     patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
@@ -276,9 +285,13 @@ def main():
             drop_last=False,
         )
     else:
+        token_dir = processed_dir
+        if not (token_dir / "train_tokens.npy").exists():
+            token_dir = Path(cfg["data"]["processed_dir_patcher"])
+            print(f"train_tokens.npy not in tiny dir, loading from patcher dir")
         train_loader, val_loader = build_dataloaders(
-            processed_dir / "train_tokens.npy",
-            processed_dir / "val_tokens.npy",
+            token_dir / "train_tokens.npy",
+            token_dir / "val_tokens.npy",
             seq_len=seq_len,
             batch_size=int(tcfg["batch_size"]),
         )
@@ -333,6 +346,9 @@ def main():
     best_val = float("inf")
     lr_reduction_state: dict[int, bool] = {}
     model.train()
+
+    # Dtype probe — log what the trunk actually receives on first batch
+    _dtype_probed = False
     while step < max_steps:
         for batch in train_loader:
             lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min) * float(lr_reduction_state.get("scale", 1.0))
@@ -342,12 +358,18 @@ def main():
             if use_cached_hidden:
                 xh, y = batch
                 xh, y = xh.to(device), y.to(device)
+                if not _dtype_probed:
+                    print(f"  dtype probe — cached hidden: {xh.dtype}  targets: {y.dtype}")
+                    _dtype_probed = True
                 with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
                     _, loss = model.forward_from_hidden(xh, y)
                     loss = loss / grad_accum_steps
             else:
                 x, y = batch
                 x, y = x.to(device), y.to(device)
+                if not _dtype_probed:
+                    print(f"  dtype probe — token input: {x.dtype}  targets: {y.dtype}")
+                    _dtype_probed = True
                 with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
                     _, loss = model(x, y)
                     loss = loss / grad_accum_steps
