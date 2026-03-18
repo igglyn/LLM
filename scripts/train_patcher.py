@@ -10,6 +10,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import argparse
+import math
+import collections
 
 import torch
 
@@ -17,7 +19,65 @@ from blt_lite.model import PatcherAutoencoder
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
+from blt_lite.ademamix import AdEMAMix
 from torch.optim import AdamW
+
+
+class OOMEnvelopeTracker:
+    """
+    Tracks the lower envelope of a noisy loss curve and detects when
+    the envelope crosses into a new order-of-magnitude regime.
+
+    Bounces are filtered by maintaining a short window of recent losses
+    and only updating the envelope minimum from the lower percentile of
+    that window. Each time the envelope crosses a new OOM boundary
+    downward, a reset is signalled.
+
+    Parameters:
+        window_size  : number of recent loss values to track
+        percentile   : lower percentile of window used to estimate envelope (0-100)
+        oom_step     : fractional OOM step that triggers a reset (default 1.0 = every power of 10)
+    """
+    def __init__(self, window_size: int = 50, percentile: float = 20.0, oom_step: float = 1.0):
+        self.window_size  = window_size
+        self.percentile   = percentile
+        self.oom_step     = oom_step
+        self.window       = collections.deque(maxlen=window_size)
+        self.envelope_min = float("inf")
+        self.last_oom_bucket = None
+
+    def update(self, loss: float) -> bool:
+        """
+        Update with new loss value.
+        Returns True if a slow EMA reset should fire.
+        """
+        self.window.append(loss)
+        if len(self.window) < self.window_size:
+            return False
+
+        # Estimate lower envelope from bottom percentile of window
+        sorted_vals = sorted(self.window)
+        idx = max(0, int(len(sorted_vals) * self.percentile / 100.0) - 1)
+        envelope = sorted_vals[idx]
+
+        if envelope < self.envelope_min:
+            self.envelope_min = envelope
+
+        if envelope <= 0:
+            return False
+
+        # Quantise to OOM buckets of size oom_step
+        current_bucket = math.floor(math.log10(envelope) / self.oom_step)
+
+        if self.last_oom_bucket is None:
+            self.last_oom_bucket = current_bucket
+            return False
+
+        if current_bucket < self.last_oom_bucket:
+            self.last_oom_bucket = current_bucket
+            return True
+
+        return False
 
 
 def build_patcher_and_embed(cfg: dict, tokenizer: FixedPatchTokenizer, device: torch.device):
@@ -98,11 +158,39 @@ def main():
 
     token_emb, patcher = build_patcher_and_embed(cfg, tokenizer, device)
     params = list(token_emb.parameters()) + list(patcher.parameters())
-    optimizer = AdamW(
-        params,
-        lr=float(patcher_train.get("lr", 3e-4)),
-        weight_decay=float(patcher_train.get("weight_decay", 0.01)),
-    )
+
+    optimizer_type = str(patcher_train.get("optimizer", "adamw")).lower()
+    if optimizer_type == "ademamix":
+        betas = (
+            float(patcher_train.get("beta1", 0.9)),
+            float(patcher_train.get("beta2", 0.999)),
+            float(patcher_train.get("beta3", 0.9999)),
+        )
+        optimizer = AdEMAMix(
+            params,
+            lr=float(patcher_train.get("lr", 3e-4)),
+            betas=betas,
+            alpha=float(patcher_train.get("alpha", 2.0)),
+            beta3_warmup=patcher_train.get("beta3_warmup", None),
+            alpha_warmup=patcher_train.get("alpha_warmup", None),
+            weight_decay=float(patcher_train.get("weight_decay", 0.01)),
+        )
+        slow_ema_reset_every = None
+        oom_tracker = OOMEnvelopeTracker(
+            window_size=int(patcher_train.get("slow_ema_window", 50)),
+            percentile=float(patcher_train.get("slow_ema_percentile", 20.0)),
+            oom_step=float(patcher_train.get("slow_ema_oom_step", 1.0)),
+        )
+        print(f"Using AdEMAMix optimizer (slow EMA reset on OOM envelope crossing)")
+    else:
+        optimizer = AdamW(
+            params,
+            lr=float(patcher_train.get("lr", 3e-4)),
+            weight_decay=float(patcher_train.get("weight_decay", 0.01)),
+            fused=(torch.cuda.is_available()),
+        )
+        oom_tracker = None
+        print("Using AdamW optimizer")
     patcher_amp_enabled = bool(patcher_train.get("amp_enabled", cfg.get("train", {}).get("amp_enabled", True)))
     patcher_amp_dtype = torch.float16 if str(patcher_train.get("amp_dtype", cfg.get("train", {}).get("amp_dtype", "float16"))) == "float16" else torch.bfloat16
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and patcher_amp_enabled))
@@ -138,6 +226,11 @@ def main():
 
             if step % 20 == 0:
                 print(f"patcher_step={step} recon_loss={loss.item():.10f}")
+
+            if oom_tracker is not None:
+                if oom_tracker.update(loss.item()):
+                    optimizer.reset_slow_ema()
+                    print(f"patcher_step={step} slow EMA reset (envelope crossed OOM {oom_tracker.last_oom})")
 
             lr_reduction_state = maybe_reduce_lr_by_thresholds(optimizer, loss.item(), patcher_train, lr_reduction_state)
 

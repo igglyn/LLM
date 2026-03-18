@@ -21,6 +21,7 @@ from blt_lite.model import TinyPatchLM
 from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
+from blt_lite.ademamix import AdEMAMix
 from torch.optim import AdamW
 
 
@@ -251,11 +252,17 @@ def main():
     tokenizer = FixedPatchTokenizer.load(processed_dir / "tokenizer.json")
 
     seq_len = _token_seq_len_from_cfg(cfg)
-    cached_train = processed_dir / "train_stage2_hidden.npy"
-    cached_val = processed_dir / "val_stage2_hidden.npy"
+    patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
+    if patcher2_enabled:
+        cached_train = processed_dir / "train_stage2_hidden.npy"
+        cached_val   = processed_dir / "val_stage2_hidden.npy"
+    else:
+        cached_train = processed_dir / "train_stage1_hidden.npy"
+        cached_val   = processed_dir / "val_stage1_hidden.npy"
     use_cached_hidden = cached_train.exists() and cached_val.exists()
 
     if use_cached_hidden:
+        print("Using cached stage2 hidden states for tiny LM training")
         train_loader = DataLoader(
             HiddenCausalDataset(cached_train, processed_dir / "train_tokens.npy", seq_len),
             batch_size=int(tcfg["batch_size"]),
@@ -268,7 +275,6 @@ def main():
             shuffle=False,
             drop_last=False,
         )
-        print("Using cached stage2 hidden states for tiny LM training")
     else:
         train_loader, val_loader = build_dataloaders(
             processed_dir / "train_tokens.npy",
@@ -285,11 +291,31 @@ def main():
         model.load_state_dict(resume_ckpt["model"])
         print(f"Resumed from checkpoint {ckpt_path} at step={step}")
 
-    optimizer = AdamW(
-        model.parameters(),
-        lr=float(tcfg.get("lr_max", 3e-4)),
-        weight_decay=float(tcfg["weight_decay"]),
-    )
+    optimizer_type = str(tcfg.get("optimizer", "adamw")).lower()
+    if optimizer_type == "ademamix":
+        betas = (
+            float(tcfg.get("beta1", 0.9)),
+            float(tcfg.get("beta2", 0.999)),
+            float(tcfg.get("beta3", 0.9999)),
+        )
+        optimizer = AdEMAMix(
+            model.parameters(),
+            lr=float(tcfg.get("lr_max", 3e-4)),
+            betas=betas,
+            alpha=float(tcfg.get("alpha", 2.0)),
+            beta3_warmup=tcfg.get("beta3_warmup", None),
+            alpha_warmup=tcfg.get("alpha_warmup", None),
+            weight_decay=float(tcfg["weight_decay"]),
+        )
+        print(f"Using AdEMAMix optimizer")
+    else:
+        optimizer = AdamW(
+            model.parameters(),
+            lr=float(tcfg.get("lr_max", 3e-4)),
+            weight_decay=float(tcfg["weight_decay"]),
+            fused=(torch.cuda.is_available()),
+        )
+        print("Using AdamW optimizer")
     amp_enabled = bool(tcfg.get("amp_enabled", True))
     amp_dtype = torch.float16 if str(tcfg.get("amp_dtype", "float16")) == "float16" else torch.bfloat16
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_enabled))

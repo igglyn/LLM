@@ -290,19 +290,29 @@ def main():
         print(f"Reconstruction accuracy OK ({recon_stats['match_rate']*100:.2f}% >= {args.min_accuracy*100:.2f}%)")
 
     # --- Cache hidden states ---
+    # Name the cache files based on whether patcher2 is active so that
+    # train_tiny.py cannot accidentally load a patcher1-only cache as stage2.
+    if patcher2_enabled:
+        train_cache_name = "train_stage2_hidden.npy"
+        val_cache_name   = "val_stage2_hidden.npy"
+    else:
+        train_cache_name = "train_stage1_hidden.npy"
+        val_cache_name   = "val_stage1_hidden.npy"
+
     print("Caching train hidden states...")
-    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / "train_stage2_hidden.npy", d_model)
+    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / train_cache_name, d_model)
 
     print("Caching val hidden states...")
-    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / "val_stage2_hidden.npy", d_model)
+    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / val_cache_name, d_model)
 
     summary = {
         "source_dir": str(source_dir),
         "stage_dir": str(out_dir),
         "train_tokens": int(train_tokens.shape[0]),
         "val_tokens": int(val_tokens.shape[0]),
-        "train_stage2_hidden": "train_stage2_hidden.npy",
-        "val_stage2_hidden": "val_stage2_hidden.npy",
+        "train_hidden": train_cache_name,
+        "val_hidden": val_cache_name,
+        "patcher2_enabled": patcher2_enabled,
         "model_seq_len_large_patches": int(cfg["model"]["seq_len"]),
         "effective_token_seq_len": seq_len,
         "patcher_reconstruction": {
