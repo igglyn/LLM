@@ -141,6 +141,8 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher_block_size=int(patcher_cfg.get("block_size", 8)),
         patcher2_block_attention=bool(cfg.get("patcher2", {}).get("block_attention", False)),
         patcher2_block_size=int(cfg.get("patcher2", {}).get("block_size", 8)),
+        trunk_block_attention=bool(model_cfg.get("block_attention", False)),
+        trunk_block_size=int(model_cfg.get("block_size", 8)),
     ).to(device)
 
 

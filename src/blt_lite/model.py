@@ -388,6 +388,8 @@ class TinyPatchLM(nn.Module):
         patcher_block_size: int = 8,
         patcher2_block_attention: bool = False,
         patcher2_block_size: int = 8,
+        trunk_block_attention: bool = False,
+        trunk_block_size: int = 8,
     ):
         super().__init__()
         if patch_size <= 0 or patcher2_patch_size <= 0:
@@ -400,6 +402,8 @@ class TinyPatchLM(nn.Module):
         self.use_amp = use_amp
         self.amp_dtype = torch.float16 if amp_dtype == "float16" else torch.bfloat16
         self.grad_checkpointing = grad_checkpointing
+        self.trunk_block_attention = trunk_block_attention
+        self.trunk_block_size = trunk_block_size
         if pos_encoding not in {"learned", "rope"}:
             raise ValueError("pos_encoding must be one of: learned, rope")
         self.pos_encoding = pos_encoding
@@ -504,7 +508,7 @@ class TinyPatchLM(nn.Module):
             rope_cos = self.rope_cos_cached if self.pos_encoding == "rope" else None
             rope_sin = self.rope_sin_cached if self.pos_encoding == "rope" else None
             for block in self.blocks:
-                h = _run_block_with_optional_checkpoint(block, h, rope_cos, rope_sin, self.training and self.grad_checkpointing)
+                h = _run_block_with_optional_checkpoint(block, h, rope_cos, rope_sin, self.training and self.grad_checkpointing, block_attention=self.trunk_block_attention, block_size=self.trunk_block_size)
 
             h = self.ln_f(h)
             logits = self.lm_head(h)
