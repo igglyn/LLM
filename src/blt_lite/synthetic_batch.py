@@ -528,20 +528,18 @@ class NNv2Block:
         return a_aff, b_aff
 
     def compress(self, nnv5: "NNv5Block"):
-        """
-        Run NNv2 compression on NNv5's current case table.
-        Operates in-place on this NNv2 block's own table.
+        """Compress full NNv5 table — use compress_range for incremental updates."""
+        self.compress_range(nnv5, 0, nnv5.array_used)
 
-        For each NNv5 case (chunk by chunk):
-            - REDUCE: if emit matches an existing NNv2 case, AND the match patterns
-            - SPLIT: if emit is a superset of an existing case's positive bits,
-                     split only if both subcases satisfy the lower bound
-            - APPEND: otherwise add as new case
+    def compress_range(self, nnv5: "NNv5Block", start: int, end: int):
         """
-        if nnv5.array_used == 0 or nnv5.emit_used == 0:
+        Run NNv2 compression on a range of NNv5 cases [start, end).
+        Called once per NNv5 chunk with only the newly added cases.
+        """
+        if nnv5.emit_used == 0 or start >= end:
             return
 
-        for ci in range(nnv5.array_used):
+        for ci in range(start, end):
             src_match_pos = nnv5.match[0, :, ci]   # (bool_dim,)
             src_match_neg = nnv5.match[1, :, ci]
             src_emit_pos  = nnv5.emit[0, ci]        # (emit_words,)
@@ -837,23 +835,23 @@ class SyntheticBatchHarness:
 
         for start in range(0, N, chunk):
             chunk_vecs = bool_vecs[start:start + chunk]
+            cases_before = self.nnv5.array_used
 
             if nnv2_active:
-                # NNv5 gets candidates, NNv2 decides what to commit
                 diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
                 neg_case, new_cases, new_cases_emit, new_group_cases = \
                     self.nnv5.assign_candidates(diff, emit, was_matched)
                 self.nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
-                # NNv2 compresses the updated NNv5 table
-                self.nnv2.compress(self.nnv5)
             else:
-                # Pure NNv5 until first group forms
                 diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
                 self.nnv5.assign(diff, emit, was_matched)
                 if self.nnv5.emit_used > 0:
-                    # First group just formed — seed NNv2
-                    self.nnv2.compress(self.nnv5)
                     nnv2_active = True
+
+            # Compress only the cases added this chunk
+            cases_after = self.nnv5.array_used
+            if nnv2_active and cases_after > cases_before:
+                self.nnv2.compress_range(self.nnv5, cases_before, cases_after)
 
             all_choices.append(choices)
 
