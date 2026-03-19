@@ -22,6 +22,7 @@ from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
 from blt_lite.ademamix import AdEMAMix
+from blt_lite.synthetic_batch import SyntheticBatchHarness
 from torch.optim import AdamW
 
 
@@ -329,6 +330,32 @@ def main():
             fused=(torch.cuda.is_available()),
         )
         print("Using AdamW optimizer")
+
+    # --- Synthetic batch harness ---
+    synth_cfg = cfg.get("synthetic_batch", {})
+    synth_enabled = bool(synth_cfg.get("enabled", False))
+    synth_harness = None
+    if synth_enabled:
+        model_cfg = cfg["model"]
+        d_model  = int(model_cfg["d_model"])
+        synth_harness = SyntheticBatchHarness(
+            model=model,
+            d_model=d_model,
+            bool_dim=int(synth_cfg.get("bool_dim", d_model)),
+            case_capacity=int(synth_cfg.get("case_capacity", 4096)),
+            group_capacity=int(synth_cfg.get("group_capacity", 256)),
+            n_synthetic=int(synth_cfg.get("n_synthetic", 4)),
+            match_threshold=float(synth_cfg.get("match_threshold", 0.1)),
+            device=device,
+            seed=int(tcfg.get("seed", 42)),
+        )
+        # Add projection parameters to optimizer
+        optimizer.add_param_group({"params": list(synth_harness.projection_parameters())})
+        synth_harness.attach()
+        synth_loss_weight = float(synth_cfg.get("synth_loss_weight", 0.5))
+        print(f"Synthetic batch enabled — bool_dim={synth_cfg.get('bool_dim', d_model)} "
+              f"n_synthetic={synth_cfg.get('n_synthetic', 4)} "
+              f"case_capacity={synth_cfg.get('case_capacity', 4096)}")
     amp_enabled = bool(tcfg.get("amp_enabled", True))
     amp_dtype = torch.float16 if str(tcfg.get("amp_dtype", "float16")) == "float16" else torch.bfloat16
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_enabled))
@@ -374,6 +401,14 @@ def main():
                     _, loss = model(x, y)
                     loss = loss / grad_accum_steps
 
+            # Synthetic batch pass — between forward and backward
+            if synth_harness is not None and synth_harness.captured_hidden is not None:
+                synth_loss = synth_harness.synthetic_pass(
+                    synth_harness.captured_hidden,
+                    y if use_cached_hidden else y,
+                )
+                loss = loss + synth_loss_weight * synth_loss / grad_accum_steps
+
             scaler.scale(loss).backward()
 
             if (step + 1) % grad_accum_steps == 0:
@@ -385,6 +420,9 @@ def main():
 
             if step % 20 == 0:
                 print(f"step={step} train_loss={loss.item() * grad_accum_steps:.4f} lr={lr:.6f}")
+                if synth_harness is not None:
+                    s = synth_harness.stats()
+                    print(f"  nnv5 cases={s['cases_used']}/{s['case_capacity']} groups={s['groups_used']}/{s['group_capacity']}")
 
             if step % eval_every == 0 and step > 0:
                 val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches) if use_cached_hidden else evaluate(model, val_loader, device, max_batches=eval_batches)
@@ -409,6 +447,8 @@ def main():
                 break
 
     torch.save({"model": model.state_dict(), "config": cfg}, out_dir / "last.pt")
+    if synth_harness is not None:
+        synth_harness.detach()
     print(f"Training complete. Outputs in {out_dir}")
 
 
