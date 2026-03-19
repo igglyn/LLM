@@ -206,7 +206,9 @@ class NNv5Block:
             diff2 = diff[..., None] ^ self.match[None, ..., :self.array_used]
             diffed_neg_mask = diff2[:, 0].any(axis=1).all(axis=0)
             new_case_mask   = diff2[:, 0].any(axis=1).all(axis=1)
-            self.match[1, :, :self.array_used][:, ~diffed_neg_mask] &= neg_case
+            neg_cols = np.where(~diffed_neg_mask)[0]
+            if neg_cols.size > 0:
+                self.match[1, :, neg_cols] &= neg_case[:, None]
         else:
             new_case_mask = np.ones(diff.shape[0], dtype=bool)
 
