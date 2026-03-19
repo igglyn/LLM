@@ -195,6 +195,113 @@ class NNv5Block:
 
         return diff_cul2, emit_cul2, was_matched_cul2, choices, counts
 
+    def forward_torch(
+        self,
+        tokens: np.ndarray,
+        device: torch.device,
+        emit_chunk_size: int = 64,
+    ):
+        """
+        Torch forward pass — same logic as forward() but runs on GPU.
+        Uses int64 bitwise ops (reinterpreting uint64 emit arrays).
+        Returns numpy arrays for assign compatibility.
+
+        tokens: (N, bool_dim) uint8 numpy array
+        """
+        if self.array_used == 0:
+            n = tokens.shape[0]
+            tokens_inv = 1 - tokens
+            inp = np.stack((tokens, tokens_inv), axis=1)
+            inp2, idxs = np.unique(inp, axis=0, return_index=True)
+            diff        = inp2
+            emit        = np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64)
+            was_matched = np.zeros(inp2.shape[0], dtype=bool)
+            choices     = np.zeros((n, 0), dtype=bool)
+            counts      = np.zeros(0, dtype=np.uint64)
+            return diff, emit, was_matched, choices, counts
+
+        C = self.array_used
+        N = tokens.shape[0]
+
+        # Zero-copy view as torch — match stays uint8, emit reinterpreted as int64
+        t_match = torch.from_numpy(self.match[:, :, :C]).to(device)          # (2, D, C) uint8
+        t_emit  = torch.from_numpy(
+            self.emit[:, :C].view(np.int64)
+        ).to(device)                                                           # (2, C, W) int64
+
+        t_inp = torch.from_numpy(
+            np.stack((tokens, 1 - tokens), axis=1).copy()
+        ).to(device)                                                           # (N, 2, D) uint8
+
+        # --- FORWARD: subset match ---
+        inp_exp    = t_inp.unsqueeze(-1)                                       # (N, 2, D, 1)
+        match_view = t_match.unsqueeze(0)                                      # (1, 2, D, C)
+        selection  = inp_exp & match_view                                      # (N, 2, D, C)
+        choices_t  = (selection == match_view).all(dim=(1, 2))                # (N, C)
+        was_matched_t = choices_t.any(dim=1)                                  # (N,)
+
+        # --- EMIT AGGREGATION: vectorized int64 AND reduction ---
+        emit_mask = t_emit.any(dim=(0, 2))                                    # (C,) bool
+
+        # active: cases that fired AND have non-empty emit — (N, C)
+        active = choices_t & emit_mask.unsqueeze(0)
+
+        # Expand emit for broadcasting: (1, 2, C, W)
+        emit_exp = t_emit.unsqueeze(0)                                         # (1, 2, C, W)
+
+        # Replace inactive cases with AND identity (-1 in int64 = all 1s)
+        active_exp = active.unsqueeze(1).unsqueeze(3)                         # (N, 1, C, 1)
+        masked_emit = torch.where(
+            active_exp.expand(N, 2, C, self.emit_words),
+            emit_exp.expand(N, 2, C, self.emit_words),
+            torch.full((1,), -1, dtype=torch.int64, device=device).expand(N, 2, C, self.emit_words),
+        )
+
+        # AND reduce over case dimension
+        emit_out_t = masked_emit.min(dim=2).values                            # (N, 2, W) — wrong, use reduce
+        # torch has no bitwise_and.reduce — fold manually
+        emit_out_t = masked_emit[:, :, 0]                                     # (N, 2, W)
+        for ci in range(1, C):
+            emit_out_t = emit_out_t & masked_emit[:, :, ci]
+
+        emit_out_t[~was_matched_t] = 0
+
+        # --- REVERSE: OR match patterns of matched cases ---
+        # choices_t: (N, C) → (N, 1, 1, C), match: (1, 2, D, C)
+        cho_exp  = choices_t.unsqueeze(1).unsqueeze(1)                        # (N, 1, 1, C)
+        mat_exp  = t_match.unsqueeze(0)                                        # (1, 2, D, C)
+        contrib  = torch.where(
+            cho_exp.expand(N, 2, self.bool_dim, C),
+            mat_exp.expand(N, 2, self.bool_dim, C),
+            torch.zeros(1, dtype=torch.uint8, device=device).expand(N, 2, self.bool_dim, C),
+        )
+        reverse_t = contrib.any(dim=3).to(torch.uint8)                        # (N, 2, D)
+
+        diff_t = reverse_t & t_inp ^ t_inp
+
+        # Back to numpy
+        choices_np     = choices_t.cpu().numpy()
+        diff_np        = diff_t.cpu().numpy()
+        emit_out_np    = emit_out_t.cpu().numpy().view(np.uint64)
+        was_matched_np = was_matched_t.cpu().numpy()
+
+        # Filter trivial diffs
+        non_zero = diff_np[:, 0].any(axis=1)
+        diff_cul = diff_np[non_zero]
+        emit_cul = emit_out_np[non_zero]
+        was_matched_cul = was_matched_np[non_zero]
+
+        if diff_cul.shape[0] > 0:
+            diff_cul2, idxs = np.unique(diff_cul, axis=0, return_index=True)
+            emit_cul2        = emit_cul[idxs]
+            was_matched_cul2 = was_matched_cul[idxs]
+        else:
+            diff_cul2, emit_cul2, was_matched_cul2 = diff_cul, emit_cul, was_matched_cul
+
+        counts = np.count_nonzero(choices_np, axis=0).astype(np.uint64)
+
+        return diff_cul2, emit_cul2, was_matched_cul2, choices_np, counts
+
     def assign_candidates(self, diff: np.ndarray, emit: np.ndarray, was_matched: np.ndarray) -> tuple:
         """
         Process diffs into candidate cases without committing to the table.
@@ -798,6 +905,7 @@ class SyntheticBatchHarness:
         seed: int = 42,
         nnv5_chunk_size: int = 16,
         nnv5_update_steps: int = 100,
+        emit_chunk_size: int = 64,
     ):
         self.model             = model
         self.d_model           = d_model
@@ -807,6 +915,7 @@ class SyntheticBatchHarness:
         self.device            = device
         self.nnv5_chunk_size   = nnv5_chunk_size
         self.nnv5_update_steps = nnv5_update_steps
+        self.emit_chunk_size   = emit_chunk_size
         self.rng               = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
@@ -851,13 +960,21 @@ class SyntheticBatchHarness:
             chunk_vecs = bool_vecs[start:start + chunk]
             cases_before = self.nnv5.array_used
 
+            use_torch = self.device.type == "cuda"
+
             if nnv2_active:
-                diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
+                if use_torch:
+                    diff, emit, was_matched, choices, _ = self.nnv5.forward_torch(chunk_vecs, self.device, self.emit_chunk_size)
+                else:
+                    diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
                 neg_case, new_cases, new_cases_emit, new_group_cases = \
                     self.nnv5.assign_candidates(diff, emit, was_matched)
                 self.nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
             else:
-                diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
+                if use_torch:
+                    diff, emit, was_matched, choices, _ = self.nnv5.forward_torch(chunk_vecs, self.device, self.emit_chunk_size)
+                else:
+                    diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
                 self.nnv5.assign(diff, emit, was_matched)
                 if self.nnv5.emit_used > 0:
                     nnv2_active = True
