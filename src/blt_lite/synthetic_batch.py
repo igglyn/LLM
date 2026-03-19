@@ -129,9 +129,13 @@ class NNv5Block:
         """
         if self.array_used == 0:
             n = tokens.shape[0]
-            diff        = np.zeros((0, 2, self.bool_dim), dtype=np.uint8)
-            emit        = np.zeros((0, 2, self.emit_words), dtype=np.uint64)
-            was_matched = np.zeros(0, dtype=bool)
+            tokens_inv = 1 - tokens
+            inp = np.stack((tokens, tokens_inv), axis=1)       # (N, 2, bool_dim)
+            # Deduplicate
+            inp2, idxs = np.unique(inp, axis=0, return_index=True)
+            diff        = inp2
+            emit        = np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64)
+            was_matched = np.zeros(inp2.shape[0], dtype=bool)  # nothing matched
             choices     = np.zeros((n, 0), dtype=bool)
             counts      = np.zeros(0, dtype=np.uint64)
             return diff, emit, was_matched, choices, counts
