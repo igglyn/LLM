@@ -434,6 +434,8 @@ class SyntheticBatchHarness:
         nnv5_update_steps: int = 100,
         projection_warmup_steps: int = 200,
         projection_sparsity_weight: float = 5.0,
+        projection_logit_norm: bool = True,
+        projection_warmup_dropout: float = 0.3,
     ):
         self.model                      = model
         self.d_model                    = d_model
@@ -445,6 +447,8 @@ class SyntheticBatchHarness:
         self.nnv5_update_steps          = nnv5_update_steps
         self.projection_warmup_steps    = projection_warmup_steps
         self.projection_sparsity_weight = projection_sparsity_weight
+        self.projection_logit_norm      = projection_logit_norm
+        self.projection_warmup_dropout  = projection_warmup_dropout
         self.rng                        = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
@@ -512,7 +516,14 @@ class SyntheticBatchHarness:
             if step == 0:
                 print("  Projection warmup started")
             x = real_hidden.reshape(-1, self.d_model)
-            soft = torch.clamp(torch.sigmoid(self.projection.to_bool(x)), 1e-6, 1 - 1e-6)
+            logits = self.projection.to_bool(x)
+            # Normalization — prevents logits growing unboundedly large
+            if self.projection_logit_norm:
+                logits = logits / (logits.std(dim=-1, keepdim=True) + 1e-8)
+            # Dropout — forces robustness to bit flipping, resists saturation
+            if self.projection_warmup_dropout > 0:
+                logits = F.dropout(logits, p=self.projection_warmup_dropout, training=True)
+            soft = torch.clamp(torch.sigmoid(logits), 1e-6, 1 - 1e-6)
             encoded = self.projection.encode(x)
             decoded = self.projection.decode(encoded)
             recon_loss = F.mse_loss(decoded, x.detach())
