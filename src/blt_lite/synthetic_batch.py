@@ -195,10 +195,17 @@ class NNv5Block:
 
         return diff_cul2, emit_cul2, was_matched_cul2, choices, counts
 
-    def assign(self, diff: np.ndarray, emit: np.ndarray, was_matched: np.ndarray):
-        """Update case table from forward pass residuals."""
+    def assign_candidates(self, diff: np.ndarray, emit: np.ndarray, was_matched: np.ndarray) -> tuple:
+        """
+        Process diffs into candidate cases without committing to the table.
+        Returns (neg_case, new_cases, new_cases_emit, new_group_cases) for
+        downstream NNv2 processing or direct commit.
+        """
         if diff.shape[0] == 0:
-            return
+            empty = np.zeros((0, 2, self.bool_dim), dtype=np.uint8)
+            empty_emit = np.zeros((0, 2, self.emit_words), dtype=np.uint64)
+            neg_case = np.ones(self.bool_dim, dtype=np.uint8)
+            return neg_case, empty, empty_emit, empty
 
         neg_case = np.bitwise_and.reduce(diff[:, 1], axis=0)
 
@@ -212,19 +219,26 @@ class NNv5Block:
         else:
             new_case_mask = np.ones(diff.shape[0], dtype=bool)
 
-        new_cases = diff[new_case_mask & was_matched]
+        new_cases      = diff[new_case_mask & was_matched]
+        new_cases_emit = emit[new_case_mask & was_matched]
+        new_group_cases = diff[new_case_mask & ~was_matched]
+
+        return neg_case, new_cases, new_cases_emit, new_group_cases
+
+    def commit_candidates(self, neg_case: np.ndarray, new_cases: np.ndarray,
+                          new_cases_emit: np.ndarray, new_group_cases: np.ndarray):
+        """Directly commit candidates to the table — NNv5 path."""
         if new_cases.shape[0] > 0:
             n = new_cases.shape[0]
             assert self.array_used + n <= self.case_capacity, "Case capacity exceeded"
             sl = slice(self.array_used, self.array_used + n)
             self.match[:, :, sl] = np.permute_dims(new_cases, (1, 2, 0))
             self.match[1, :, sl] &= neg_case[..., None]
-            emit_shift = np.permute_dims(emit[new_case_mask & was_matched], (1, 0, 2))
+            emit_shift = np.permute_dims(new_cases_emit, (1, 0, 2))
             self.emit[0, sl] |= emit_shift[0]
             self.emit[1, sl] &= emit_shift[1]
             self.array_used += n
 
-        new_group_cases = diff[new_case_mask & ~was_matched]
         if new_group_cases.shape[0] > 0:
             assert self.array_used + 1 <= self.case_capacity, "Case capacity exceeded"
             assert self.emit_used < self.group_capacity, "Group capacity exceeded"
@@ -244,6 +258,13 @@ class NNv5Block:
 
             self._set_emit_group_bit(slice(None, self.array_used), gidx, is_member=False)
             self.array_used += 1
+
+    def assign(self, diff: np.ndarray, emit: np.ndarray, was_matched: np.ndarray):
+        """Full assign — candidates + direct commit. Used when NNv2 is not active."""
+        neg_case, new_cases, new_cases_emit, new_group_cases = self.assign_candidates(
+            diff, emit, was_matched
+        )
+        self.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
 
     def activation_density(self, choices: np.ndarray) -> np.ndarray:
         """
@@ -397,8 +418,341 @@ class NNv5Block:
 
 
 # ---------------------------------------------------------------------------
-# Synthetic Batch Harness
+# NNv2 Block — emit-first compression layer
 # ---------------------------------------------------------------------------
+
+class NNv2Block:
+    """
+    Compression layer operating on NNv5's case structure.
+
+    NNv2 operates emit-first, match-second — it takes NNv5's group membership
+    bitsets as inputs and produces a compressed case table bounded by N*(N-1)
+    where N is the group count.
+
+    Three operations:
+        Reduce  — merge cases sharing identical group membership
+        Split   — divide a case covering multiple groups into subcases
+                  (only when each subcase can satisfy the lower bound:
+                   at least one positive AND one negative group membership)
+        Append  — add new cases not covered by existing structure
+
+    NNv2 activates only once NNv5 has formed at least one group (emit_used > 0).
+    After activation, NNv5's assign_candidates output is routed through NNv2
+    instead of being committed directly.
+    """
+    def __init__(self, bool_dim: int, group_capacity: int, case_capacity: int):
+        self.bool_dim       = bool_dim
+        self.group_capacity = group_capacity
+        self.case_capacity  = case_capacity
+        self.emit_words     = (group_capacity + 63) // 64
+
+        self.array_used = 0
+
+        # match: (2, bool_dim, case_capacity) uint8
+        self.match = np.zeros((2, bool_dim, case_capacity), dtype=np.uint8)
+        # emit: (2, case_capacity, emit_words) uint64 — group membership bitsets
+        self.emit  = np.zeros((2, case_capacity, self.emit_words), dtype=np.uint64)
+        # float_emit: (case_capacity, group_capacity) float32
+        # Per-case affinity weight per group — used for weighted synthesis.
+        # Initialised to 1.0 for positive member groups, 0.0 otherwise.
+        # On Reduce: average the affinities of merged cases.
+        # On Split: older subcase keeps its affinities, newer gets remainder
+        #           (waterfall-with-half, respecting case age via insertion order).
+        self.float_emit = np.zeros((case_capacity, group_capacity), dtype=np.float32)
+
+    def _emit_pos(self, idx) -> np.ndarray:
+        return self.emit[0, idx]
+
+    def _emit_neg(self, idx) -> np.ndarray:
+        return self.emit[1, idx]
+
+    def _has_pos_and_neg(self, emit_pos_row: np.ndarray, emit_neg_row: np.ndarray) -> bool:
+        """Check that a case has at least one positive and one negative group bit."""
+        return emit_pos_row.any() and emit_neg_row.any()
+
+    def _emit_rows_equal(self, a_pos, a_neg, b_pos, b_neg) -> bool:
+        return np.array_equal(a_pos, b_pos) and np.array_equal(a_neg, b_neg)
+
+    def _init_float_emit(self, case_idx: int, emit_pos: np.ndarray):
+        """Initialise float affinities for a new case — 1.0 for positive member groups."""
+        for g in range(self.group_capacity):
+            word, bit = divmod(g, 64)
+            flag = np.uint64(1) << np.uint64(bit)
+            if (emit_pos[word] & flag) != 0:
+                self.float_emit[case_idx, g] = 1.0
+
+    def _init_float_emit_to(self, target: np.ndarray, emit_pos: np.ndarray):
+        """Write float affinities into a pre-allocated array."""
+        target[:] = 0.0
+        for g in range(self.group_capacity):
+            word, bit = divmod(g, 64)
+            flag = np.uint64(1) << np.uint64(bit)
+            if (emit_pos[word] & flag) != 0:
+                target[g] = 1.0
+
+    def _group_affinity(self, case_idx: int) -> np.ndarray:
+        """Return float affinity vector for a case. (group_capacity,)"""
+        return self.float_emit[case_idx]
+
+    def _waterfall_split(self, parent_affinity: np.ndarray,
+                         sub_a_pos: np.ndarray, sub_b_pos: np.ndarray) -> tuple:
+        """
+        Split parent float affinities between two subcases using waterfall logic.
+
+        Older subcase (A, kept in place) preserves its share.
+        Newer subcase (B, appended) receives the remainder.
+
+        Each subcase only inherits affinity for its own positive groups.
+        If a group belongs to both subcases it's split half+1 to A, rest to B.
+        """
+        a_aff = np.zeros(self.group_capacity, dtype=np.float32)
+        b_aff = np.zeros(self.group_capacity, dtype=np.float32)
+
+        for g in range(self.group_capacity):
+            word, bit = divmod(g, 64)
+            flag = np.uint64(1) << np.uint64(bit)
+            in_a = bool((sub_a_pos[word] & flag) != 0)
+            in_b = bool((sub_b_pos[word] & flag) != 0)
+            v = parent_affinity[g]
+
+            if in_a and in_b:
+                # Shared group — half+1 to older (A), rest to newer (B)
+                a_share = v / 2.0 + (v % 1.0 > 0) * 0.5  # approximate half+1
+                a_aff[g] = min(v, a_share)
+                b_aff[g] = max(0.0, v - a_aff[g])
+            elif in_a:
+                a_aff[g] = v
+            elif in_b:
+                b_aff[g] = v
+
+        return a_aff, b_aff
+
+    def compress(self, nnv5: "NNv5Block"):
+        """
+        Run NNv2 compression on NNv5's current case table.
+        Operates in-place on this NNv2 block's own table.
+
+        For each NNv5 case (chunk by chunk):
+            - REDUCE: if emit matches an existing NNv2 case, AND the match patterns
+            - SPLIT: if emit is a superset of an existing case's positive bits,
+                     split only if both subcases satisfy the lower bound
+            - APPEND: otherwise add as new case
+        """
+        if nnv5.array_used == 0 or nnv5.emit_used == 0:
+            return
+
+        for ci in range(nnv5.array_used):
+            src_match_pos = nnv5.match[0, :, ci]   # (bool_dim,)
+            src_match_neg = nnv5.match[1, :, ci]
+            src_emit_pos  = nnv5.emit[0, ci]        # (emit_words,)
+            src_emit_neg  = nnv5.emit[1, ci]
+
+            # --- REDUCE: find existing case with identical emit ---
+            reduced = False
+            for ei in range(self.array_used):
+                if self._emit_rows_equal(
+                    self._emit_pos(ei), self._emit_neg(ei),
+                    src_emit_pos, src_emit_neg,
+                ):
+                    # Merge match patterns via AND (tighten constraints)
+                    self.match[0, :, ei] &= src_match_pos
+                    self.match[1, :, ei] &= src_match_neg
+                    # Average float affinities of merged cases
+                    src_aff = np.zeros(self.group_capacity, dtype=np.float32)
+                    self._init_float_emit_to(src_aff, src_emit_pos)
+                    self.float_emit[ei] = (self.float_emit[ei] + src_aff) * 0.5
+                    reduced = True
+                    break
+
+            if reduced:
+                continue
+
+            # --- SPLIT: find existing case whose positive emit is superset ---
+            split = False
+            for ei in range(self.array_used):
+                existing_pos = self._emit_pos(ei)
+                existing_neg = self._emit_neg(ei)
+                if not np.array_equal(existing_pos & src_emit_pos, src_emit_pos):
+                    continue
+                if np.array_equal(existing_pos, src_emit_pos):
+                    continue  # identical — handled by reduce
+
+                sub_a_pos = existing_pos & src_emit_pos
+                sub_a_neg = existing_neg | src_emit_neg
+                sub_b_pos = existing_pos & ~src_emit_pos
+                sub_b_neg = existing_neg
+
+                if (self._has_pos_and_neg(sub_a_pos, sub_a_neg) and
+                        self._has_pos_and_neg(sub_b_pos, sub_b_neg)):
+                    # Waterfall split of float affinities
+                    parent_aff = self.float_emit[ei].copy()
+                    a_aff, b_aff = self._waterfall_split(parent_aff, sub_a_pos, sub_b_pos)
+
+                    # Replace existing with subcase A
+                    self.emit[0, ei] = sub_a_pos
+                    self.emit[1, ei] = sub_a_neg
+                    self.match[0, :, ei] &= src_match_pos
+                    self.match[1, :, ei] &= src_match_neg
+                    self.float_emit[ei] = a_aff
+
+                    # Append subcase B (newer — gets remainder)
+                    if self.array_used < self.case_capacity:
+                        bi = self.array_used
+                        self.match[0, :, bi] = self.match[0, :, ei]
+                        self.match[1, :, bi] = self.match[1, :, ei]
+                        self.emit[0, bi] = sub_b_pos
+                        self.emit[1, bi] = sub_b_neg
+                        self.float_emit[bi] = b_aff
+                        self.array_used += 1
+
+                    split = True
+                    break
+
+            if split:
+                continue
+
+            # --- APPEND: new case ---
+            if self.array_used < self.case_capacity:
+                idx = self.array_used
+                self.match[0, :, idx] = src_match_pos
+                self.match[1, :, idx] = src_match_neg
+                self.emit[0, idx] = src_emit_pos
+                self.emit[1, idx] = src_emit_neg
+                self._init_float_emit(idx, src_emit_pos)
+                self.array_used += 1
+
+    def forward(self, tokens: np.ndarray):
+        """
+        Same forward pass as NNv5 — subset match on bool arrays.
+        Used when NNv2 takes over from NNv5 as primary case handler.
+
+        tokens: (N, bool_dim) uint8
+        returns: (diff, emit, was_matched, choices)
+        """
+        if self.array_used == 0:
+            n = tokens.shape[0]
+            tokens_inv = 1 - tokens
+            inp = np.stack((tokens, tokens_inv), axis=1)
+            inp2, idxs = np.unique(inp, axis=0, return_index=True)
+            return (inp2,
+                    np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64),
+                    np.zeros(inp2.shape[0], dtype=bool),
+                    np.zeros((n, 0), dtype=bool))
+
+        tokens_inv = 1 - tokens
+        inp = np.stack((tokens, tokens_inv), axis=1)         # (N, 2, D)
+        match_view = self.match[None, ..., :self.array_used] # (1, 2, D, C)
+        selection  = inp[..., None] & match_view
+        choices    = (selection == match_view).all((1, 2))   # (N, C)
+        was_matched = choices.any(axis=1)
+
+        emit_view  = self.emit[None, :, :self.array_used]
+        emit_mask  = self.emit[:, :self.array_used].any(axis=(0, 2))
+        emit_broad = np.broadcast_to(
+            emit_view, (tokens.shape[0], 2, self.array_used, self.emit_words)
+        )
+        emit_out = np.bitwise_and.reduce(
+            emit_broad, axis=2,
+            where=choices[:, None, :, None] & emit_mask[None, None, :, None],
+        )
+        emit_out[~was_matched] = np.uint64(0)
+
+        match_broad = np.broadcast_to(
+            match_view, (tokens.shape[0], 2, self.bool_dim, self.array_used)
+        )
+        reverse = np.bitwise_or.reduce(
+            match_broad, axis=3, where=choices[:, None, None, :]
+        )
+        diff = reverse & inp ^ inp
+        non_zero = diff[:, 0].any(axis=1)
+        diff_cul = diff[non_zero]
+        emit_cul = emit_out[non_zero]
+        was_matched_cul = was_matched[non_zero]
+
+        if diff_cul.shape[0] > 0:
+            diff_cul2, idxs = np.unique(diff_cul, axis=0, return_index=True)
+            emit_cul2 = emit_cul[idxs]
+            was_matched_cul2 = was_matched_cul[idxs]
+        else:
+            diff_cul2, emit_cul2, was_matched_cul2 = diff_cul, emit_cul, was_matched_cul
+
+        return diff_cul2, emit_cul2, was_matched_cul2, choices
+
+    def stats(self) -> dict:
+        return {
+            "nnv2_cases_used": self.array_used,
+            "nnv2_case_capacity": self.case_capacity,
+        }
+
+    def synthesize_from(self, bool_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        """
+        Generate synthetic bool vectors anchored to real input positions.
+        Uses float affinities for weighted case sampling during synthesis.
+        """
+        if self.array_used == 0:
+            return bool_vecs.copy()
+
+        N = bool_vecs.shape[0]
+        results = np.zeros((N, self.bool_dim), dtype=np.uint8)
+        emit_pos = self.emit[0, :self.array_used]
+
+        _, _, _, choices = self.forward(bool_vecs)
+
+        for i in range(N):
+            if choices.shape[1] == 0 or not choices[i].any():
+                results[i] = bool_vecs[i]
+                continue
+
+            matched_emit = emit_pos[choices[i]]
+            member_groups = []
+            for g in range(self.group_capacity):
+                word, bit = divmod(g, 64)
+                flag = np.uint64(1) << np.uint64(bit)
+                if (matched_emit[:, word] & flag).any():
+                    member_groups.append(g)
+
+            if not member_groups:
+                results[i] = bool_vecs[i]
+                continue
+
+            # Find cases in member groups — weighted by float affinity
+            member_mask = np.zeros(self.array_used, dtype=bool)
+            for g in member_groups:
+                word, bit = divmod(g, 64)
+                flag = np.uint64(1) << np.uint64(bit)
+                member_mask |= ((emit_pos[:, word] & flag) != 0)
+
+            member_idxs = np.where(member_mask)[0]
+
+            # Weight by sum of float affinities across member groups
+            weights = np.array([
+                self.float_emit[idx, member_groups].sum()
+                for idx in member_idxs
+            ], dtype=np.float32)
+            total = weights.sum()
+            if total > 0:
+                weights /= total
+            else:
+                weights = np.ones(len(member_idxs), dtype=np.float32) / len(member_idxs)
+
+            n_sample = max(1, rng.integers(1, len(member_idxs) + 1))
+            sampled = rng.choice(member_idxs, size=n_sample, replace=False, p=weights)
+
+            synth = bool_vecs[i].copy()
+            for idx in sampled:
+                synth |= self.match[0, :, idx]
+
+            neg_union = np.zeros(self.bool_dim, dtype=np.uint8)
+            for idx in sampled:
+                neg_union |= self.match[1, :, idx]
+            synth &= ~neg_union
+
+            results[i] = synth
+
+        return results
+
+
+
 
 class SyntheticBatchHarness:
     """
@@ -432,27 +786,20 @@ class SyntheticBatchHarness:
         seed: int = 42,
         nnv5_chunk_size: int = 16,
         nnv5_update_steps: int = 100,
-        projection_warmup_steps: int = 200,
-        projection_sparsity_weight: float = 5.0,
-        projection_logit_norm: bool = True,
-        projection_warmup_dropout: float = 0.3,
     ):
-        self.model                      = model
-        self.d_model                    = d_model
-        self.bool_dim                   = bool_dim
-        self.n_synthetic                = n_synthetic
-        self.match_threshold            = match_threshold
-        self.device                     = device
-        self.nnv5_chunk_size            = nnv5_chunk_size
-        self.nnv5_update_steps          = nnv5_update_steps
-        self.projection_warmup_steps    = projection_warmup_steps
-        self.projection_sparsity_weight = projection_sparsity_weight
-        self.projection_logit_norm      = projection_logit_norm
-        self.projection_warmup_dropout  = projection_warmup_dropout
-        self.rng                        = np.random.default_rng(seed)
+        self.model             = model
+        self.d_model           = d_model
+        self.bool_dim          = bool_dim
+        self.n_synthetic       = n_synthetic
+        self.match_threshold   = match_threshold
+        self.device            = device
+        self.nnv5_chunk_size   = nnv5_chunk_size
+        self.nnv5_update_steps = nnv5_update_steps
+        self.rng               = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
         self.nnv5       = NNv5Block(bool_dim, case_capacity, group_capacity)
+        self.nnv2       = NNv2Block(bool_dim, group_capacity, case_capacity)
 
         self.captured_hidden: torch.Tensor | None = None
         self._hook = None
@@ -475,6 +822,10 @@ class SyntheticBatchHarness:
         Processes inputs in chunks so cases built from early chunks are
         available for matching by later chunks within the same batch.
 
+        Once NNv5 has formed at least one group, NNv2 compression runs
+        after each chunk. Once NNv5's table is frozen, inputs go directly
+        to NNv2's forward pass instead.
+
         hidden: (B, T, D) float
         """
         bool_vecs = self.projection.encode_hard(hidden.reshape(-1, self.d_model))
@@ -482,14 +833,31 @@ class SyntheticBatchHarness:
         chunk = self.nnv5_chunk_size
         all_choices = []
 
+        nnv2_active = self.nnv5.emit_used > 0
+
         for start in range(0, N, chunk):
             chunk_vecs = bool_vecs[start:start + chunk]
-            diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
-            self.nnv5.assign(diff, emit, was_matched)
+
+            if nnv2_active:
+                # NNv5 gets candidates, NNv2 decides what to commit
+                diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
+                neg_case, new_cases, new_cases_emit, new_group_cases = \
+                    self.nnv5.assign_candidates(diff, emit, was_matched)
+                self.nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
+                # NNv2 compresses the updated NNv5 table
+                self.nnv2.compress(self.nnv5)
+            else:
+                # Pure NNv5 until first group forms
+                diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
+                self.nnv5.assign(diff, emit, was_matched)
+                if self.nnv5.emit_used > 0:
+                    # First group just formed — seed NNv2
+                    self.nnv2.compress(self.nnv5)
+                    nnv2_active = True
+
             all_choices.append(choices)
 
         # Pad choices to uniform case count for the caller
-        # (case count grows during chunking so shapes differ)
         max_cases = max(c.shape[1] for c in all_choices) if all_choices else 0
         padded = [
             np.pad(c, ((0, 0), (0, max_cases - c.shape[1]))) for c in all_choices
@@ -511,35 +879,6 @@ class SyntheticBatchHarness:
 
         returns: scalar loss tensor
         """
-        # Projection warmup — train encode/decode reconstruction before NNv5
-        if step < self.projection_warmup_steps:
-            if step == 0:
-                print("  Projection warmup started")
-            x = real_hidden.reshape(-1, self.d_model)
-            logits = self.projection.to_bool(x)
-            # Normalization — prevents logits growing unboundedly large
-            if self.projection_logit_norm:
-                logits = logits / (logits.std(dim=-1, keepdim=True) + 1e-8)
-            # Dropout — forces robustness to bit flipping, resists saturation
-            if self.projection_warmup_dropout > 0:
-                logits = F.dropout(logits, p=self.projection_warmup_dropout, training=True)
-            soft = torch.clamp(torch.sigmoid(logits), 1e-6, 1 - 1e-6)
-            encoded = self.projection.encode(x)
-            decoded = self.projection.decode(encoded)
-            recon_loss = F.mse_loss(decoded, x.detach())
-            # Entropy loss — maximizes per-dimension diversity, not just global mean
-            eps = 1e-8
-            entropy = -(soft * (soft + eps).log() + (1 - soft) * (1 - soft + eps).log())
-            sparsity_loss = -entropy.mean()  # maximize entropy = minimize negative entropy
-            total_loss = recon_loss + self.projection_sparsity_weight * sparsity_loss
-            if step % 100 == 0:
-                print(f"  projection warmup step={step} recon={recon_loss.item():.4f} "
-                      f"sparsity={sparsity_loss.item():.4f} mean={soft.detach().mean().item():.3f}")
-            if step == self.projection_warmup_steps - 1:
-                print(f"  Projection warmup complete at step {step} — "
-                      f"bool mean={soft.detach().mean().item():.3f}")
-            return total_loss
-
         # Only update case table for first nnv5_update_steps steps
         if step < self.nnv5_update_steps:
             self.update_case_table(real_hidden)
@@ -558,8 +897,13 @@ class SyntheticBatchHarness:
             real_hidden.reshape(-1, self.d_model)
         )  # (B*T, bool_dim)
 
-        # Generate synthetic bool vectors anchored to real positions
-        synth_bools = self.nnv5.synthesize_from(bool_vecs, self.rng)  # (B*T, bool_dim)
+        # Generate synthetic bool vectors — use NNv2 table if available
+        if self.nnv2.array_used > 0:
+            synth_bools = self.nnv2.synthesize_from(bool_vecs, self.rng) \
+                if hasattr(self.nnv2, 'synthesize_from') \
+                else self.nnv5.synthesize_from(bool_vecs, self.rng)
+        else:
+            synth_bools = self.nnv5.synthesize_from(bool_vecs, self.rng)  # (B*T, bool_dim)
         synth_bools_t = torch.from_numpy(synth_bools).float().to(self.device)
 
         # Project back to float hidden states
@@ -576,4 +920,6 @@ class SyntheticBatchHarness:
         return self.projection.parameters()
 
     def stats(self) -> dict:
-        return self.nnv5.stats()
+        s = self.nnv5.stats()
+        s.update(self.nnv2.stats())
+        return s

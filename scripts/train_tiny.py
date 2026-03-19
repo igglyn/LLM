@@ -350,10 +350,6 @@ def main():
             seed=int(tcfg.get("seed", 42)),
             nnv5_chunk_size=int(synth_cfg.get("nnv5_chunk_size", 16)),
             nnv5_update_steps=int(synth_cfg.get("nnv5_update_steps", 100)),
-            projection_warmup_steps=int(synth_cfg.get("projection_warmup_steps", 200)),
-            projection_sparsity_weight=float(synth_cfg.get("projection_sparsity_weight", 5.0)),
-            projection_logit_norm=bool(synth_cfg.get("projection_logit_norm", True)),
-            projection_warmup_dropout=float(synth_cfg.get("projection_warmup_dropout", 0.3)),
         )
         # Add projection parameters to optimizer
         optimizer.add_param_group({"params": list(synth_harness.projection_parameters())})
@@ -429,7 +425,7 @@ def main():
                 print(f"step={step} train_loss={loss.item() * grad_accum_steps:.4f} lr={lr:.6f}")
                 if synth_harness is not None:
                     s = synth_harness.stats()
-                    print(f"  nnv5 cases={s['cases_used']}/{s['case_capacity']} groups={s['groups_used']}/{s['group_capacity']}")
+                    print(f"  nnv5 cases={s['cases_used']}/{s['case_capacity']} groups={s['groups_used']}/{s['group_capacity']} | nnv2 cases={s['nnv2_cases_used']}/{s['nnv2_case_capacity']}")
 
             if step % eval_every == 0 and step > 0:
                 val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches) if use_cached_hidden else evaluate(model, val_loader, device, max_batches=eval_batches)
