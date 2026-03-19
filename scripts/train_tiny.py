@@ -351,6 +351,7 @@ def main():
             nnv5_chunk_size=int(synth_cfg.get("nnv5_chunk_size", 16)),
             nnv5_update_steps=int(synth_cfg.get("nnv5_update_steps", 100)),
             projection_warmup_steps=int(synth_cfg.get("projection_warmup_steps", 200)),
+            projection_sparsity_weight=float(synth_cfg.get("projection_sparsity_weight", 1.0)),
         )
         # Add projection parameters to optimizer
         optimizer.add_param_group({"params": list(synth_harness.projection_parameters())})

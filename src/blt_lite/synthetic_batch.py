@@ -433,17 +433,19 @@ class SyntheticBatchHarness:
         nnv5_chunk_size: int = 16,
         nnv5_update_steps: int = 100,
         projection_warmup_steps: int = 200,
+        projection_sparsity_weight: float = 1.0,
     ):
-        self.model                   = model
-        self.d_model                 = d_model
-        self.bool_dim                = bool_dim
-        self.n_synthetic             = n_synthetic
-        self.match_threshold         = match_threshold
-        self.device                  = device
-        self.nnv5_chunk_size         = nnv5_chunk_size
-        self.nnv5_update_steps       = nnv5_update_steps
-        self.projection_warmup_steps = projection_warmup_steps
-        self.rng                     = np.random.default_rng(seed)
+        self.model                      = model
+        self.d_model                    = d_model
+        self.bool_dim                   = bool_dim
+        self.n_synthetic                = n_synthetic
+        self.match_threshold            = match_threshold
+        self.device                     = device
+        self.nnv5_chunk_size            = nnv5_chunk_size
+        self.nnv5_update_steps          = nnv5_update_steps
+        self.projection_warmup_steps    = projection_warmup_steps
+        self.projection_sparsity_weight = projection_sparsity_weight
+        self.rng                        = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
         self.nnv5       = NNv5Block(bool_dim, case_capacity, group_capacity)
@@ -512,9 +514,15 @@ class SyntheticBatchHarness:
             encoded = self.projection.encode(real_hidden.reshape(-1, self.d_model))
             decoded = self.projection.decode(encoded)
             recon_loss = F.mse_loss(decoded, real_hidden.reshape(-1, self.d_model).detach())
+            sparsity_loss = (encoded.mean() - 0.5).pow(2)
+            total_loss = recon_loss + self.projection_sparsity_weight * sparsity_loss
+            if step % 100 == 0:
+                print(f"  projection warmup step={step} recon={recon_loss.item():.4f} "
+                      f"sparsity={sparsity_loss.item():.4f} mean={encoded.detach().mean().item():.3f}")
             if step == self.projection_warmup_steps - 1:
-                print(f"  Projection warmup complete at step {step}")
-            return recon_loss
+                print(f"  Projection warmup complete at step {step} — "
+                      f"bool mean={encoded.detach().mean().item():.3f}")
+            return total_loss
 
         # Only update case table for first nnv5_update_steps steps
         if step < self.nnv5_update_steps:
