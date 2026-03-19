@@ -682,6 +682,20 @@ class NNv2Block:
             "nnv2_case_capacity": self.case_capacity,
         }
 
+    def sync_to_nnv5(self, nnv5: "NNv5Block"):
+        """
+        Replace NNv5's active case table with NNv2's compressed table.
+        NNv5's forward pass then matches against NNv2's smaller case set,
+        making subsequent forward passes cheaper.
+        Groups and emit_used are preserved — only case arrays are replaced.
+        """
+        n = self.array_used
+        if n == 0:
+            return
+        nnv5.match[:, :, :n] = self.match[:, :, :n]
+        nnv5.emit[:, :n]     = self.emit[:, :n]
+        nnv5.array_used      = n
+
     def synthesize_from(self, bool_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """
         Generate synthetic bool vectors anchored to real input positions.
@@ -848,10 +862,11 @@ class SyntheticBatchHarness:
                 if self.nnv5.emit_used > 0:
                     nnv2_active = True
 
-            # Compress only the cases added this chunk
+            # Compress only the cases added this chunk, then sync back to NNv5
             cases_after = self.nnv5.array_used
             if nnv2_active and cases_after > cases_before:
                 self.nnv2.compress_range(self.nnv5, cases_before, cases_after)
+                self.nnv2.sync_to_nnv5(self.nnv5)
 
             all_choices.append(choices)
 
