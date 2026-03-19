@@ -26,6 +26,7 @@ Config keys (under synthetic_batch in tiny.yaml):
 """
 from __future__ import annotations
 
+import functools
 import numpy as np
 import torch
 import torch.nn as nn
@@ -257,12 +258,11 @@ class NNv5Block:
             torch.full((1,), -1, dtype=torch.int64, device=device).expand(N, 2, C, self.emit_words),
         )
 
-        # AND reduce over case dimension
-        emit_out_t = masked_emit.min(dim=2).values                            # (N, 2, W) — wrong, use reduce
-        # torch has no bitwise_and.reduce — fold manually
-        emit_out_t = masked_emit[:, :, 0]                                     # (N, 2, W)
-        for ci in range(1, C):
-            emit_out_t = emit_out_t & masked_emit[:, :, ci]
+        # AND reduce over case dimension — functools.reduce over slices
+        emit_out_t = functools.reduce(
+            torch.bitwise_and,
+            [masked_emit[:, :, ci] for ci in range(C)]
+        )
 
         emit_out_t[~was_matched_t] = 0
 
@@ -457,11 +457,7 @@ class NNv5Block:
     def synthesize_from(self, bool_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """
         Generate synthetic bool vectors anchored to real input positions.
-
-        For each position, find its group memberships via NNv5 forward,
-        then construct a variant by mixing in patterns from other cases
-        in the same groups. Targets stay valid because each synthetic
-        maps 1:1 to a real position.
+        Vectorized — computes group memberships and case masks in batch.
 
         bool_vecs: (N, bool_dim) uint8
         returns:   (N, bool_dim) uint8 synthetic vectors
@@ -470,47 +466,48 @@ class NNv5Block:
             return bool_vecs.copy()
 
         N = bool_vecs.shape[0]
-        results = np.zeros((N, self.bool_dim), dtype=np.uint8)
-        emit_pos = self.emit[0, :self.array_used]   # (C, W)
+        C = self.array_used
+        G = self.emit_used
+        emit_pos = self.emit[0, :C]   # (C, W)
 
+        # Run forward to get choices for all inputs at once
         _, _, _, choices, _ = self.forward(bool_vecs)  # (N, C)
+
+        # Unpack group membership bits for all cases — (C, G) bool
+        case_group_pos = np.zeros((C, G), dtype=bool)
+        for g in range(G):
+            word, bit = divmod(g, 64)
+            flag = np.uint64(1) << np.uint64(bit)
+            case_group_pos[:, g] = (emit_pos[:, word] & flag) != 0
+
+        # For each input: which groups does it belong to via matched cases?
+        # choices: (N, C), case_group_pos: (C, G) → input_groups: (N, G)
+        input_groups = choices @ case_group_pos  # (N, G) — count of matched cases per group
+
+        # For each input: which cases are reachable via its groups?
+        # input_groups > 0: (N, G), case_group_pos: (C, G) → reachable: (N, C)
+        reachable = (input_groups > 0) @ case_group_pos.T  # (N, C)
+
+        # Build synthetic vectors
+        results = bool_vecs.copy()
+        pos_match = self.match[0, :, :C]  # (D, C)
+        neg_match = self.match[1, :, :C]  # (D, C)
 
         for i in range(N):
             if not choices[i].any():
-                results[i] = bool_vecs[i]
+                continue  # unmatched — keep original
+
+            member_idxs = np.where(reachable[i])[0]
+            if len(member_idxs) == 0:
                 continue
 
-            matched_emit = emit_pos[choices[i]]         # (K, W)
-            member_groups = []
-            for g in range(self.emit_used):
-                word, bit = divmod(g, 64)
-                flag = np.uint64(1) << np.uint64(bit)
-                if (matched_emit[:, word] & flag).any():
-                    member_groups.append(g)
-
-            if not member_groups:
-                results[i] = bool_vecs[i]
-                continue
-
-            member_mask = np.zeros(self.array_used, dtype=bool)
-            for g in member_groups:
-                word, bit = divmod(g, 64)
-                flag = np.uint64(1) << np.uint64(bit)
-                member_mask |= ((emit_pos[:, word] & flag) != 0)
-
-            member_idxs = np.where(member_mask)[0]
+            # Random subset of reachable cases
             n_sample = max(1, rng.integers(1, len(member_idxs) + 1))
-            sampled = rng.choice(member_idxs, size=n_sample, replace=False)
+            sampled  = rng.choice(member_idxs, size=n_sample, replace=False)
 
             synth = bool_vecs[i].copy()
-            for idx in sampled:
-                synth |= self.match[0, :, idx]
-
-            neg_union = np.zeros(self.bool_dim, dtype=np.uint8)
-            for idx in sampled:
-                neg_union |= self.match[1, :, idx]
-            synth &= ~neg_union
-
+            synth |= np.bitwise_or.reduce(pos_match[:, sampled], axis=1)
+            synth &= ~np.bitwise_or.reduce(neg_match[:, sampled], axis=1)
             results[i] = synth
 
         return results
