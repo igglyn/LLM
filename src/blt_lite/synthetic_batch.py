@@ -433,7 +433,7 @@ class SyntheticBatchHarness:
         nnv5_chunk_size: int = 16,
         nnv5_update_steps: int = 100,
         projection_warmup_steps: int = 200,
-        projection_sparsity_weight: float = 1.0,
+        projection_sparsity_weight: float = 5.0,
     ):
         self.model                      = model
         self.d_model                    = d_model
@@ -512,7 +512,7 @@ class SyntheticBatchHarness:
             if step == 0:
                 print("  Projection warmup started")
             x = real_hidden.reshape(-1, self.d_model)
-            soft = torch.sigmoid(self.projection.to_bool(x))
+            soft = torch.clamp(torch.sigmoid(self.projection.to_bool(x)), 1e-6, 1 - 1e-6)
             encoded = self.projection.encode(x)
             decoded = self.projection.decode(encoded)
             recon_loss = F.mse_loss(decoded, x.detach())
