@@ -870,54 +870,102 @@ class NNv2Block:
 
 
 
+from dataclasses import dataclass
+
+@dataclass
+class NNv5LayerConfig:
+    """Per-layer configuration for the two-layer NNv5 pipeline."""
+    chunk_dim:          int = 32    # bits per NNv5 chunk — must satisfy chunk_dim1 * chunk_dim2 == d_model
+    case_capacity:      int = 2048
+    group_capacity:     int = 128
+    nnv5_chunk_size:    int = 16
+    nnv2_case_capacity: int = 1024
+
+
 class SyntheticBatchHarness:
     """
     Wraps a TinyPatchLM trunk to provide synthetic batch augmentation.
 
+    Two-layer NNv5 pipeline (no learned projection):
+        Layer 1: raw hidden states → threshold to bool → chunk by chunk_dim1
+                 → NNv5+NNv2 per chunk → concatenated emit bitsets
+        Layer 2: layer1 emit bits → chunk by chunk_dim2
+                 → NNv5+NNv2 → final group affinities for synthesis
+
+    Constraint: layer1.chunk_dim * layer2.chunk_dim == d_model
+
     Usage in training loop:
         harness = SyntheticBatchHarness(model, cfg, device)
-        harness.attach()                        # register forward hook
-
-        # Real batch forward
+        harness.attach()
         logits, loss = model(x, y)
-        real_hidden = harness.captured_hidden   # (B, T, D)
-
-        # Synthetic pass
-        synth_loss = harness.synthetic_pass(real_hidden, y)
+        synth_loss = harness.synthetic_pass(harness.captured_hidden, y)
         total_loss = loss + synth_weight * synth_loss
-
         loss.backward()
-        harness.detach()                        # call when done training
+        harness.detach()
     """
     def __init__(
         self,
         model,
         d_model: int,
-        bool_dim: int,
-        case_capacity: int,
-        group_capacity: int,
+        layer1: NNv5LayerConfig,
+        layer2: NNv5LayerConfig,
         n_synthetic: int,
         match_threshold: float,
         device: torch.device,
         seed: int = 42,
-        nnv5_chunk_size: int = 16,
         nnv5_update_steps: int = 100,
         emit_chunk_size: int = 64,
+        synth_loss_weight: float = 0.5,
     ):
+        # Validate chunk_dim constraint
+        assert layer1.chunk_dim * layer2.chunk_dim == d_model, (
+            f"layer1.chunk_dim ({layer1.chunk_dim}) * layer2.chunk_dim ({layer2.chunk_dim}) "
+            f"must equal d_model ({d_model})"
+        )
+
         self.model             = model
         self.d_model           = d_model
-        self.bool_dim          = bool_dim
         self.n_synthetic       = n_synthetic
         self.match_threshold   = match_threshold
         self.device            = device
-        self.nnv5_chunk_size   = nnv5_chunk_size
         self.nnv5_update_steps = nnv5_update_steps
         self.emit_chunk_size   = emit_chunk_size
+        self.synth_loss_weight = synth_loss_weight
         self.rng               = np.random.default_rng(seed)
 
-        self.projection = BoolProjection(d_model, bool_dim).to(device)
-        self.nnv5       = NNv5Block(bool_dim, case_capacity, group_capacity)
-        self.nnv2       = NNv2Block(bool_dim, group_capacity, case_capacity)
+        self.layer1_cfg = layer1
+        self.layer2_cfg = layer2
+
+        # Layer 1 — operates on d_model // chunk_dim1 chunks of chunk_dim1 bits
+        n_chunks1 = d_model // layer1.chunk_dim
+        assert (layer1.group_capacity * n_chunks1) % layer2.chunk_dim == 0, (
+            f"layer2.chunk_dim ({layer2.chunk_dim}) must divide "
+            f"layer1 total emit bits ({layer1.group_capacity * n_chunks1})"
+        )
+        self.nnv5_l1 = [
+            NNv5Block(layer1.chunk_dim, layer1.case_capacity, layer1.group_capacity)
+            for _ in range(n_chunks1)
+        ]
+        self.nnv2_l1 = [
+            NNv2Block(layer1.chunk_dim, layer1.group_capacity, layer1.nnv2_case_capacity)
+            for _ in range(n_chunks1)
+        ]
+
+        # Layer 2 — flat chunks over layer1 total emit bits
+        layer2_input_width = layer1.group_capacity * n_chunks1
+        n_chunks2 = layer2_input_width // layer2.chunk_dim
+        self.nnv5_l2 = [
+            NNv5Block(layer2.chunk_dim, layer2.case_capacity, layer2.group_capacity)
+            for _ in range(n_chunks2)
+        ]
+        self.nnv2_l2 = [
+            NNv2Block(layer2.chunk_dim, layer2.group_capacity, layer2.nnv2_case_capacity)
+            for _ in range(n_chunks2)
+        ]
+
+        self.n_chunks1         = n_chunks1
+        self.n_chunks2         = n_chunks2
+        self.layer2_input_width = layer2_input_width
 
         self.captured_hidden: torch.Tensor | None = None
         self._hook = None
@@ -934,62 +982,123 @@ class SyntheticBatchHarness:
             self._hook.remove()
             self._hook = None
 
+    def _hidden_to_bool(self, hidden: torch.Tensor) -> np.ndarray:
+        """
+        Convert float hidden states to bool arrays by thresholding at 0.
+        No learned projection — direct quantization.
+
+        hidden: (N, d_model) float
+        returns: (N, d_model) uint8
+        """
+        return (hidden > 0).cpu().numpy().astype(np.uint8)
+
+    def _run_layer(
+        self,
+        bool_vecs: np.ndarray,
+        nnv5_list: list,
+        nnv2_list: list,
+        chunk_dim: int,
+        nnv5_chunk_size: int,
+    ) -> np.ndarray:
+        """
+        Run one NNv5+NNv2 layer on chunked bool inputs.
+
+        bool_vecs: (N, input_dim) uint8
+        Splits input_dim into chunks of chunk_dim, runs NNv5+NNv2 on each,
+        concatenates the emit bitsets from all chunks.
+
+        returns: (N, n_chunks * emit_words * 64) uint8 — unpacked emit bits
+        """
+        N = bool_vecs.shape[0]
+        input_dim = bool_vecs.shape[1]
+        n_chunks  = input_dim // chunk_dim
+        use_torch = self.device.type == "cuda"
+
+        emit_parts = []
+
+        for ci, (nnv5, nnv2) in enumerate(zip(nnv5_list, nnv2_list)):
+            chunk_vecs = bool_vecs[:, ci * chunk_dim:(ci + 1) * chunk_dim]
+
+            # Process in NNv5 input chunks
+            for start in range(0, N, nnv5_chunk_size):
+                cv = chunk_vecs[start:start + nnv5_chunk_size]
+                cases_before = nnv5.array_used
+                nnv2_active  = nnv5.emit_used > 0
+
+                if use_torch:
+                    diff, emit, was_matched, choices, _ = nnv5.forward_torch(cv, self.device, self.emit_chunk_size)
+                else:
+                    diff, emit, was_matched, choices, _ = nnv5.forward(cv)
+
+                if nnv2_active:
+                    neg_case, new_cases, new_cases_emit, new_group_cases = \
+                        nnv5.assign_candidates(diff, emit, was_matched)
+                    nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
+                else:
+                    nnv5.assign(diff, emit, was_matched)
+
+                cases_after = nnv5.array_used
+                if nnv5.emit_used > 0 and cases_after > cases_before:
+                    nnv2.compress_range(nnv5, cases_before, cases_after)
+                    nnv2.sync_to_nnv5(nnv5)
+
+            # Extract emit bits for this chunk — unpack uint64 to uint8 bits
+            # Use final NNv5 forward pass to get per-input emit
+            if use_torch:
+                _, emit_out, _, _, _ = nnv5.forward_torch(chunk_vecs, self.device, self.emit_chunk_size)
+            else:
+                _, emit_out, _, _, _ = nnv5.forward(chunk_vecs)
+
+            # Unpack emit bits: (N, 2, emit_words) → (N, group_capacity) uint8
+            emit_bits = np.unpackbits(
+                emit_out[:, 0].view(np.uint8),
+                axis=1, bitorder='little'
+            )[:, :nnv5.emit_used]                        # (N, emit_used)
+            emit_parts.append(emit_bits)
+
+        # Concatenate emit bits from all chunks
+        if emit_parts:
+            return np.concatenate(emit_parts, axis=1)    # (N, total_emit_bits)
+        return np.zeros((N, 0), dtype=np.uint8)
+
     def update_case_table(self, hidden: torch.Tensor):
         """
-        Run NNv5 forward + assign on the current batch's hidden states.
-        Processes inputs in chunks so cases built from early chunks are
-        available for matching by later chunks within the same batch.
+        Run two-layer NNv5+NNv2 pipeline on the current batch's hidden states.
 
-        Once NNv5 has formed at least one group, NNv2 compression runs
-        after each chunk. Once NNv5's table is frozen, inputs go directly
-        to NNv2's forward pass instead.
+        Layer 1: raw bool chunks of d_model → per-position emit bitsets
+        Layer 2: flat chunks of layer1 emit bits → higher-order group structure
+
+        NNv5 naturally encodes positional information into group structure
+        through subset matching — no explicit windowing needed.
 
         hidden: (B, T, D) float
         """
-        bool_vecs = self.projection.encode_hard(hidden.reshape(-1, self.d_model))
-        N = bool_vecs.shape[0]
-        chunk = self.nnv5_chunk_size
-        all_choices = []
+        flat = hidden.reshape(-1, self.d_model)
+        bool_vecs = self._hidden_to_bool(flat)           # (N, d_model) uint8
 
-        nnv2_active = self.nnv5.emit_used > 0
+        # Layer 1
+        emit1 = self._run_layer(
+            bool_vecs,
+            self.nnv5_l1, self.nnv2_l1,
+            self.layer1_cfg.chunk_dim,
+            self.layer1_cfg.nnv5_chunk_size,
+        )                                                # (N, total_emit_bits) uint8
 
-        for start in range(0, N, chunk):
-            chunk_vecs = bool_vecs[start:start + chunk]
-            cases_before = self.nnv5.array_used
+        if emit1.shape[1] == 0:
+            return
 
-            use_torch = self.device.type == "cuda"
+        # Pad to chunk_dim2 boundary
+        pad = (-emit1.shape[1]) % self.layer2_cfg.chunk_dim
+        if pad > 0:
+            emit1 = np.pad(emit1, ((0, 0), (0, pad)))
 
-            if nnv2_active:
-                if use_torch:
-                    diff, emit, was_matched, choices, _ = self.nnv5.forward_torch(chunk_vecs, self.device, self.emit_chunk_size)
-                else:
-                    diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
-                neg_case, new_cases, new_cases_emit, new_group_cases = \
-                    self.nnv5.assign_candidates(diff, emit, was_matched)
-                self.nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
-            else:
-                if use_torch:
-                    diff, emit, was_matched, choices, _ = self.nnv5.forward_torch(chunk_vecs, self.device, self.emit_chunk_size)
-                else:
-                    diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
-                self.nnv5.assign(diff, emit, was_matched)
-                if self.nnv5.emit_used > 0:
-                    nnv2_active = True
-
-            # Compress only the cases added this chunk, then sync back to NNv5
-            cases_after = self.nnv5.array_used
-            if nnv2_active and cases_after > cases_before:
-                self.nnv2.compress_range(self.nnv5, cases_before, cases_after)
-                self.nnv2.sync_to_nnv5(self.nnv5)
-
-            all_choices.append(choices)
-
-        # Pad choices to uniform case count for the caller
-        max_cases = max(c.shape[1] for c in all_choices) if all_choices else 0
-        padded = [
-            np.pad(c, ((0, 0), (0, max_cases - c.shape[1]))) for c in all_choices
-        ]
-        return np.concatenate(padded, axis=0) if padded else np.zeros((N, 0), dtype=bool)
+        # Layer 2
+        self._run_layer(
+            emit1,
+            self.nnv5_l2, self.nnv2_l2,
+            self.layer2_cfg.chunk_dim,
+            self.layer2_cfg.nnv5_chunk_size,
+        )
 
     def synthetic_pass(
         self,
@@ -1000,53 +1109,106 @@ class SyntheticBatchHarness:
         """
         Generate synthetic hidden states and compute loss on them.
 
-        real_hidden: (B, T, D) float — captured from real forward pass
-        targets:     (B, T)    int64 — token targets
+        real_hidden: (B, T, D) float
+        targets:     (B, T)    int64
         step:        int       — current training step
-
-        returns: scalar loss tensor
         """
-        # Only update case table for first nnv5_update_steps steps
-        if step < self.nnv5_update_steps:
+        # Only update case tables for first nnv5_update_steps steps
+        if step <= self.nnv5_update_steps:
             self.update_case_table(real_hidden)
-        elif step == self.nnv5_update_steps:
-            self.update_case_table(real_hidden)
-            print(f"  NNv5 table frozen at step {step} — "
-                  f"cases={self.nnv5.array_used} groups={self.nnv5.emit_used}")
+            if step == self.nnv5_update_steps:
+                l1_cases  = sum(n.array_used for n in self.nnv5_l1)
+                l1_groups = sum(n.emit_used  for n in self.nnv5_l1)
+                l2_cases  = sum(n.array_used for n in self.nnv5_l2)
+                l2_groups = sum(n.emit_used  for n in self.nnv5_l2)
+                print(f"  NNv5 tables frozen at step {step} — "
+                      f"L1 cases={l1_cases} groups={l1_groups} | "
+                      f"L2 cases={l2_cases} groups={l2_groups}")
 
-        if self.nnv5.array_used == 0:
+        # Check layer2 has any structure to synthesize from
+        if not any(n.array_used > 0 for n in self.nnv5_l2):
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         B, T, D = real_hidden.shape
+        flat      = real_hidden.reshape(-1, D)
+        bool_vecs = self._hidden_to_bool(flat)           # (N, d_model)
 
-        # Project real hidden states to bool
-        bool_vecs = self.projection.encode_hard(
-            real_hidden.reshape(-1, self.d_model)
-        )  # (B*T, bool_dim)
+        # Get layer1 emit for real inputs
+        emit1 = self._run_layer(
+            bool_vecs,
+            self.nnv5_l1, self.nnv2_l1,
+            self.layer1_cfg.chunk_dim,
+            self.layer1_cfg.nnv5_chunk_size,
+        )
 
-        # Generate synthetic bool vectors — use NNv2 table if available
-        if self.nnv2.array_used > 0:
-            synth_bools = self.nnv2.synthesize_from(bool_vecs, self.rng) \
-                if hasattr(self.nnv2, 'synthesize_from') \
-                else self.nnv5.synthesize_from(bool_vecs, self.rng)
-        else:
-            synth_bools = self.nnv5.synthesize_from(bool_vecs, self.rng)  # (B*T, bool_dim)
-        synth_bools_t = torch.from_numpy(synth_bools).float().to(self.device)
+        if emit1.shape[1] == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
 
-        # Project back to float hidden states
-        synth_hidden = self.projection.decode(synth_bools_t)   # (B*T, d_model)
+        pad = (-emit1.shape[1]) % self.layer2_cfg.chunk_dim
+        if pad > 0:
+            emit1 = np.pad(emit1, ((0, 0), (0, pad)))
+
+        # Synthesize from layer2 — flat chunks over layer1 emit bits
+        # TODO: future — respect positional ordering implicit in NNv5 group structure
+        N          = bool_vecs.shape[0]
+        chunk_dim2 = self.layer2_cfg.chunk_dim
+        synth_emit1 = emit1.copy()
+
+        for ci, (nnv5, nnv2) in enumerate(zip(self.nnv5_l2, self.nnv2_l2)):
+            chunk_vecs = emit1[:, ci * chunk_dim2:(ci + 1) * chunk_dim2]
+            if nnv2.array_used > 0:
+                synth_chunk = nnv2.synthesize_from(chunk_vecs, self.rng)
+            elif nnv5.array_used > 0:
+                synth_chunk = nnv5.synthesize_from(chunk_vecs, self.rng)
+            else:
+                synth_chunk = chunk_vecs.copy()
+            synth_emit1[:, ci * chunk_dim2:(ci + 1) * chunk_dim2] = synth_chunk
+
+        # Project synthetic emit1 back to hidden states via layer1 inverse
+        # Use synthesize_from on layer1 chunks
+        synth_bool = np.zeros((N, self.d_model), dtype=np.uint8)
+        chunk_dim1 = self.layer1_cfg.chunk_dim
+
+        for ci, (nnv5, nnv2) in enumerate(zip(self.nnv5_l1, self.nnv2_l1)):
+            # Use the emit bits from synthetic emit1 to select cases
+            emit_chunk = synth_emit1[:, ci * self.layer1_cfg.group_capacity:
+                                        (ci + 1) * self.layer1_cfg.group_capacity]
+            real_chunk = bool_vecs[:, ci * chunk_dim1:(ci + 1) * chunk_dim1]
+
+            if nnv2.array_used > 0:
+                synth_chunk = nnv2.synthesize_from(real_chunk, self.rng)
+            elif nnv5.array_used > 0:
+                synth_chunk = nnv5.synthesize_from(real_chunk, self.rng)
+            else:
+                synth_chunk = real_chunk.copy()
+
+            synth_bool[:, ci * chunk_dim1:(ci + 1) * chunk_dim1] = synth_chunk
+
+        # Convert synthetic bool back to float hidden states
+        # Scale to match real hidden state range
+        synth_hidden = torch.from_numpy(synth_bool.astype(np.float32)).to(self.device)
+        # Rescale: real hidden states have non-unit variance, bool is 0/1
+        # Match mean and std of real hidden states
+        real_flat   = flat.float()
+        real_mean   = real_flat.mean(dim=0, keepdim=True)
+        real_std    = real_flat.std(dim=0, keepdim=True) + 1e-8
+        synth_hidden = (synth_hidden - synth_hidden.mean(dim=0, keepdim=True)) / \
+                       (synth_hidden.std(dim=0, keepdim=True) + 1e-8)
+        synth_hidden = synth_hidden * real_std + real_mean
         synth_hidden = synth_hidden.reshape(B, T, D)
 
-        # Targets are valid 1:1 with real positions — no borrowing needed
         _, synth_loss = self.model.forward_from_hidden(synth_hidden, targets)
-
         return synth_loss
 
-    def projection_parameters(self):
-        """Return projection parameters for optimizer."""
-        return self.projection.parameters()
-
     def stats(self) -> dict:
-        s = self.nnv5.stats()
-        s.update(self.nnv2.stats())
-        return s
+        l1_cases  = sum(n.array_used for n in self.nnv5_l1)
+        l1_groups = sum(n.emit_used  for n in self.nnv5_l1)
+        l2_cases  = sum(n.array_used for n in self.nnv5_l2)
+        l2_groups = sum(n.emit_used  for n in self.nnv5_l2)
+        nnv2_l1   = sum(n.array_used for n in self.nnv2_l1)
+        nnv2_l2   = sum(n.array_used for n in self.nnv2_l2)
+        return {
+            "l1_cases": l1_cases, "l1_groups": l1_groups,
+            "l2_cases": l2_cases, "l2_groups": l2_groups,
+            "nnv2_l1_cases": nnv2_l1, "nnv2_l2_cases": nnv2_l2,
+        }

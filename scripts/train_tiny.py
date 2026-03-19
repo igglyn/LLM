@@ -336,28 +336,46 @@ def main():
     synth_enabled = bool(synth_cfg.get("enabled", False))
     synth_harness = None
     if synth_enabled:
+        from blt_lite.synthetic_batch import NNv5LayerConfig
         model_cfg = cfg["model"]
-        d_model  = int(model_cfg["d_model"])
+        d_model   = int(model_cfg["d_model"])
+
+        l1cfg = synth_cfg.get("layer1", {})
+        l2cfg = synth_cfg.get("layer2", {})
+
+        layer1 = NNv5LayerConfig(
+            chunk_dim          = int(l1cfg.get("chunk_dim", 32)),
+            case_capacity      = int(l1cfg.get("case_capacity", 2048)),
+            group_capacity     = int(l1cfg.get("group_capacity", 128)),
+            nnv5_chunk_size    = int(l1cfg.get("nnv5_chunk_size", 16)),
+            nnv2_case_capacity = int(l1cfg.get("nnv2_case_capacity", 1024)),
+        )
+        layer2 = NNv5LayerConfig(
+            chunk_dim          = int(l2cfg.get("chunk_dim", d_model // layer1.chunk_dim)),
+            case_capacity      = int(l2cfg.get("case_capacity", 1024)),
+            group_capacity     = int(l2cfg.get("group_capacity", 64)),
+            nnv5_chunk_size    = int(l2cfg.get("nnv5_chunk_size", 16)),
+            nnv2_case_capacity = int(l2cfg.get("nnv2_case_capacity", 512)),
+        )
+
         synth_harness = SyntheticBatchHarness(
             model=model,
             d_model=d_model,
-            bool_dim=int(synth_cfg.get("bool_dim", d_model)),
-            case_capacity=int(synth_cfg.get("case_capacity", 4096)),
-            group_capacity=int(synth_cfg.get("group_capacity", 256)),
+            layer1=layer1,
+            layer2=layer2,
             n_synthetic=int(synth_cfg.get("n_synthetic", 4)),
             match_threshold=float(synth_cfg.get("match_threshold", 0.1)),
             device=device,
             seed=int(tcfg.get("seed", 42)),
-            nnv5_chunk_size=int(synth_cfg.get("nnv5_chunk_size", 16)),
             nnv5_update_steps=int(synth_cfg.get("nnv5_update_steps", 100)),
+            emit_chunk_size=int(synth_cfg.get("emit_chunk_size", 64)),
+            synth_loss_weight=float(synth_cfg.get("synth_loss_weight", 0.5)),
         )
-        # Add projection parameters to optimizer
-        optimizer.add_param_group({"params": list(synth_harness.projection_parameters())})
         synth_harness.attach()
         synth_loss_weight = float(synth_cfg.get("synth_loss_weight", 0.5))
-        print(f"Synthetic batch enabled — bool_dim={synth_cfg.get('bool_dim', d_model)} "
-              f"n_synthetic={synth_cfg.get('n_synthetic', 4)} "
-              f"case_capacity={synth_cfg.get('case_capacity', 4096)}")
+        print(f"Synthetic batch enabled — L1 chunk_dim={layer1.chunk_dim} "
+              f"L2 chunk_dim={layer2.chunk_dim} "
+              f"n_synthetic={synth_cfg.get('n_synthetic', 4)}")
     amp_enabled = bool(tcfg.get("amp_enabled", True))
     amp_dtype = torch.float16 if str(tcfg.get("amp_dtype", "float16")) == "float16" else torch.bfloat16
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_enabled))
@@ -425,7 +443,8 @@ def main():
                 print(f"step={step} train_loss={loss.item() * grad_accum_steps:.4f} lr={lr:.6f}")
                 if synth_harness is not None:
                     s = synth_harness.stats()
-                    print(f"  nnv5 cases={s['cases_used']}/{s['case_capacity']} groups={s['groups_used']}/{s['group_capacity']} | nnv2 cases={s['nnv2_cases_used']}/{s['nnv2_case_capacity']}")
+                    print(f"  synth L1 cases={s['l1_cases']} groups={s['l1_groups']} nnv2={s['nnv2_l1_cases']} | "
+                          f"L2 cases={s['l2_cases']} groups={s['l2_groups']} nnv2={s['nnv2_l2_cases']}")
 
             if step % eval_every == 0 and step > 0:
                 val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches) if use_cached_hidden else evaluate(model, val_loader, device, max_batches=eval_batches)
