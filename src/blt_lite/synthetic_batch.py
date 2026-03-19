@@ -516,7 +516,10 @@ class SyntheticBatchHarness:
             encoded = self.projection.encode(x)
             decoded = self.projection.decode(encoded)
             recon_loss = F.mse_loss(decoded, x.detach())
-            sparsity_loss = (soft.mean() - 0.5).pow(2)
+            # Entropy loss — maximizes per-dimension diversity, not just global mean
+            eps = 1e-8
+            entropy = -(soft * (soft + eps).log() + (1 - soft) * (1 - soft + eps).log())
+            sparsity_loss = -entropy.mean()  # maximize entropy = minimize negative entropy
             total_loss = recon_loss + self.projection_sparsity_weight * sparsity_loss
             if step % 100 == 0:
                 print(f"  projection warmup step={step} recon={recon_loss.item():.4f} "
