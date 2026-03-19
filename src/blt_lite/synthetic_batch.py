@@ -370,15 +370,17 @@ class SyntheticBatchHarness:
         device: torch.device,
         seed: int = 42,
         nnv5_chunk_size: int = 16,
+        nnv5_update_steps: int = 100,
     ):
-        self.model           = model
-        self.d_model         = d_model
-        self.bool_dim        = bool_dim
-        self.n_synthetic     = n_synthetic
-        self.match_threshold = match_threshold
-        self.device          = device
-        self.nnv5_chunk_size = nnv5_chunk_size
-        self.rng             = np.random.default_rng(seed)
+        self.model             = model
+        self.d_model           = d_model
+        self.bool_dim          = bool_dim
+        self.n_synthetic       = n_synthetic
+        self.match_threshold   = match_threshold
+        self.device            = device
+        self.nnv5_chunk_size   = nnv5_chunk_size
+        self.nnv5_update_steps = nnv5_update_steps
+        self.rng               = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
         self.nnv5       = NNv5Block(bool_dim, case_capacity, group_capacity)
@@ -429,17 +431,24 @@ class SyntheticBatchHarness:
         self,
         real_hidden: torch.Tensor,
         targets: torch.Tensor,
+        step: int = 0,
     ) -> torch.Tensor:
         """
         Generate synthetic hidden states and compute loss on them.
 
         real_hidden: (B, T, D) float — captured from real forward pass
         targets:     (B, T)    int64 — token targets
+        step:        int       — current training step
 
         returns: scalar loss tensor
         """
-        # Update case table from this batch
-        self.update_case_table(real_hidden)
+        # Only update case table for first nnv5_update_steps steps
+        if step < self.nnv5_update_steps:
+            self.update_case_table(real_hidden)
+        elif step == self.nnv5_update_steps:
+            self.update_case_table(real_hidden)
+            print(f"  NNv5 table frozen at step {step} — "
+                  f"cases={self.nnv5.array_used} groups={self.nnv5.emit_used}")
 
         if self.nnv5.array_used == 0:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
