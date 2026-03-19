@@ -95,9 +95,14 @@ def _encode_stream(
     device: torch.device,
     out_path: Path,
     d_model: int,
+    cache_dtype: str = "float16",
 ):
-    hidden = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float16, shape=(len(tokens), d_model))
+    np_dtype = {"float16": np.float16, "float32": np.float32, "float64": np.float64}.get(cache_dtype, np.float16)
+    torch_dtype = {"float16": torch.float16, "float32": torch.float32, "float64": torch.float64}.get(cache_dtype, torch.float16)
+
+    hidden = np.lib.format.open_memmap(out_path, mode="w+", dtype=np_dtype, shape=(len(tokens), d_model))
     chunk = max(seq_len, 1)
+    probed = False
     with torch.no_grad():
         for start in range(0, len(tokens), chunk):
             end = min(len(tokens), start + chunk)
@@ -110,10 +115,16 @@ def _encode_stream(
                 token_hidden = emb(x)
                 h1, _ = p1(token_hidden)
                 h2 = h1 if p2 is None else p2(h1)[0]
+
+            if not probed:
+                print(f"  dtype probe — token_hidden: {token_hidden.dtype}  h1: {h1.dtype}  h2: {h2.dtype}")
+                print(f"  writing cache as: {cache_dtype}")
+                probed = True
+
             take_from = start - ctx_start
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            hidden[start:end] = h2[:, take_from:, :].squeeze(0).to(torch.float16).cpu().numpy()
+            hidden[start:end] = h2[:, take_from:, :].squeeze(0).to(torch_dtype).cpu().numpy()
     hidden.flush()
 
 
@@ -213,6 +224,12 @@ def main():
     )
     parser.add_argument("--config", required=True)
     parser.add_argument(
+        "--cache-dtype",
+        choices=["float16", "float32", "float64"],
+        default=None,
+        help="Dtype to write hidden state cache. Overrides config. Default: matches live patcher output dtype.",
+    )
+    parser.add_argument(
         "--min-accuracy",
         type=float,
         default=None,
@@ -289,6 +306,9 @@ def main():
             )
         print(f"Reconstruction accuracy OK ({recon_stats['match_rate']*100:.2f}% >= {args.min_accuracy*100:.2f}%)")
 
+    # Resolve cache dtype — CLI overrides config, config overrides auto
+    cache_dtype = args.cache_dtype or str(cfg.get("data", {}).get("cache_dtype", "auto"))
+
     # --- Cache hidden states ---
     # Name the cache files based on whether patcher2 is active so that
     # train_tiny.py cannot accidentally load a patcher1-only cache as stage2.
@@ -299,11 +319,21 @@ def main():
         train_cache_name = "train_stage1_hidden.npy"
         val_cache_name   = "val_stage1_hidden.npy"
 
+    # auto: run a probe pass to detect live dtype
+    if cache_dtype == "auto":
+        with torch.no_grad():
+            probe_tokens = torch.from_numpy(train_tokens[:seq_len].astype(np.int64)).unsqueeze(0).to(device)
+            probe_h = emb(probe_tokens)
+            probe_h1, _ = p1(probe_h)
+            probe_h2 = probe_h1 if p2 is None else p2(probe_h1)[0]
+            cache_dtype = str(probe_h2.dtype).replace("torch.", "")
+            print(f"Auto-detected live patcher dtype: {cache_dtype}")
+
     print("Caching train hidden states...")
-    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / train_cache_name, d_model)
+    _encode_stream(train_tokens, emb, p1, p2, seq_len, device, out_dir / train_cache_name, d_model, cache_dtype=cache_dtype)
 
     print("Caching val hidden states...")
-    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / val_cache_name, d_model)
+    _encode_stream(val_tokens, emb, p1, p2, seq_len, device, out_dir / val_cache_name, d_model, cache_dtype=cache_dtype)
 
     summary = {
         "source_dir": str(source_dir),
