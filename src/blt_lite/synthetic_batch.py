@@ -326,6 +326,67 @@ class NNv5Block:
 
         return results
 
+    def synthesize_from(self, bool_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        """
+        Generate synthetic bool vectors anchored to real input positions.
+
+        For each position, find its group memberships via NNv5 forward,
+        then construct a variant by mixing in patterns from other cases
+        in the same groups. Targets stay valid because each synthetic
+        maps 1:1 to a real position.
+
+        bool_vecs: (N, bool_dim) uint8
+        returns:   (N, bool_dim) uint8 synthetic vectors
+        """
+        if self.array_used == 0 or self.emit_used == 0:
+            return bool_vecs.copy()
+
+        N = bool_vecs.shape[0]
+        results = np.zeros((N, self.bool_dim), dtype=np.uint8)
+        emit_pos = self.emit[0, :self.array_used]   # (C, W)
+
+        _, _, _, choices, _ = self.forward(bool_vecs)  # (N, C)
+
+        for i in range(N):
+            if not choices[i].any():
+                results[i] = bool_vecs[i]
+                continue
+
+            matched_emit = emit_pos[choices[i]]         # (K, W)
+            member_groups = []
+            for g in range(self.emit_used):
+                word, bit = divmod(g, 64)
+                flag = np.uint64(1) << np.uint64(bit)
+                if (matched_emit[:, word] & flag).any():
+                    member_groups.append(g)
+
+            if not member_groups:
+                results[i] = bool_vecs[i]
+                continue
+
+            member_mask = np.zeros(self.array_used, dtype=bool)
+            for g in member_groups:
+                word, bit = divmod(g, 64)
+                flag = np.uint64(1) << np.uint64(bit)
+                member_mask |= ((emit_pos[:, word] & flag) != 0)
+
+            member_idxs = np.where(member_mask)[0]
+            n_sample = max(1, rng.integers(1, len(member_idxs) + 1))
+            sampled = rng.choice(member_idxs, size=n_sample, replace=False)
+
+            synth = bool_vecs[i].copy()
+            for idx in sampled:
+                synth |= self.match[0, :, idx]
+
+            neg_union = np.zeros(self.bool_dim, dtype=np.uint8)
+            for idx in sampled:
+                neg_union |= self.match[1, :, idx]
+            synth &= ~neg_union
+
+            results[i] = synth
+
+        return results
+
     def stats(self) -> dict:
         return {
             "cases_used":  self.array_used,
@@ -371,16 +432,18 @@ class SyntheticBatchHarness:
         seed: int = 42,
         nnv5_chunk_size: int = 16,
         nnv5_update_steps: int = 100,
+        projection_warmup_steps: int = 200,
     ):
-        self.model             = model
-        self.d_model           = d_model
-        self.bool_dim          = bool_dim
-        self.n_synthetic       = n_synthetic
-        self.match_threshold   = match_threshold
-        self.device            = device
-        self.nnv5_chunk_size   = nnv5_chunk_size
-        self.nnv5_update_steps = nnv5_update_steps
-        self.rng               = np.random.default_rng(seed)
+        self.model                   = model
+        self.d_model                 = d_model
+        self.bool_dim                = bool_dim
+        self.n_synthetic             = n_synthetic
+        self.match_threshold         = match_threshold
+        self.device                  = device
+        self.nnv5_chunk_size         = nnv5_chunk_size
+        self.nnv5_update_steps       = nnv5_update_steps
+        self.projection_warmup_steps = projection_warmup_steps
+        self.rng                     = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
         self.nnv5       = NNv5Block(bool_dim, case_capacity, group_capacity)
@@ -442,6 +505,17 @@ class SyntheticBatchHarness:
 
         returns: scalar loss tensor
         """
+        # Projection warmup — train encode/decode reconstruction before NNv5
+        if step < self.projection_warmup_steps:
+            if step == 0:
+                print("  Projection warmup started")
+            encoded = self.projection.encode(real_hidden.reshape(-1, self.d_model))
+            decoded = self.projection.decode(encoded)
+            recon_loss = F.mse_loss(decoded, real_hidden.reshape(-1, self.d_model).detach())
+            if step == self.projection_warmup_steps - 1:
+                print(f"  Projection warmup complete at step {step}")
+            return recon_loss
+
         # Only update case table for first nnv5_update_steps steps
         if step < self.nnv5_update_steps:
             self.update_case_table(real_hidden)
@@ -453,25 +527,23 @@ class SyntheticBatchHarness:
         if self.nnv5.array_used == 0:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
-        # Generate synthetic bool vectors
         B, T, D = real_hidden.shape
-        synth_bools = self.nnv5.synthesize(self.n_synthetic * T, self.rng)  # (N*T, bool_dim)
-        synth_bools_t = torch.from_numpy(synth_bools).float().to(self.device)  # (N*T, bool_dim)
+
+        # Project real hidden states to bool
+        bool_vecs = self.projection.encode_hard(
+            real_hidden.reshape(-1, self.d_model)
+        )  # (B*T, bool_dim)
+
+        # Generate synthetic bool vectors anchored to real positions
+        synth_bools = self.nnv5.synthesize_from(bool_vecs, self.rng)  # (B*T, bool_dim)
+        synth_bools_t = torch.from_numpy(synth_bools).float().to(self.device)
 
         # Project back to float hidden states
-        synth_hidden = self.projection.decode(synth_bools_t)  # (N*T, d_model)
-        synth_hidden = synth_hidden.reshape(self.n_synthetic, T, D)
+        synth_hidden = self.projection.decode(synth_bools_t)   # (B*T, d_model)
+        synth_hidden = synth_hidden.reshape(B, T, D)
 
-        # Repeat targets for synthetic batch
-        # Use the first n_synthetic examples' targets (or tile if batch is smaller)
-        if B >= self.n_synthetic:
-            synth_targets = targets[:self.n_synthetic]
-        else:
-            reps = (self.n_synthetic + B - 1) // B
-            synth_targets = targets.repeat(reps, 1)[:self.n_synthetic]
-
-        # Forward through trunk only (hidden states bypass patcher)
-        _, synth_loss = self.model.forward_from_hidden(synth_hidden, synth_targets)
+        # Targets are valid 1:1 with real positions — no borrowing needed
+        _, synth_loss = self.model.forward_from_hidden(synth_hidden, targets)
 
         return synth_loss
 
