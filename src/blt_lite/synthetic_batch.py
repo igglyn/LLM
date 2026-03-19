@@ -511,17 +511,19 @@ class SyntheticBatchHarness:
         if step < self.projection_warmup_steps:
             if step == 0:
                 print("  Projection warmup started")
-            encoded = self.projection.encode(real_hidden.reshape(-1, self.d_model))
+            x = real_hidden.reshape(-1, self.d_model)
+            soft = torch.sigmoid(self.projection.to_bool(x))
+            encoded = self.projection.encode(x)
             decoded = self.projection.decode(encoded)
-            recon_loss = F.mse_loss(decoded, real_hidden.reshape(-1, self.d_model).detach())
-            sparsity_loss = (encoded.mean() - 0.5).pow(2)
+            recon_loss = F.mse_loss(decoded, x.detach())
+            sparsity_loss = (soft.mean() - 0.5).pow(2)
             total_loss = recon_loss + self.projection_sparsity_weight * sparsity_loss
             if step % 100 == 0:
                 print(f"  projection warmup step={step} recon={recon_loss.item():.4f} "
-                      f"sparsity={sparsity_loss.item():.4f} mean={encoded.detach().mean().item():.3f}")
+                      f"sparsity={sparsity_loss.item():.4f} mean={soft.detach().mean().item():.3f}")
             if step == self.projection_warmup_steps - 1:
                 print(f"  Projection warmup complete at step {step} — "
-                      f"bool mean={encoded.detach().mean().item():.3f}")
+                      f"bool mean={soft.detach().mean().item():.3f}")
             return total_loss
 
         # Only update case table for first nnv5_update_steps steps
