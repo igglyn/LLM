@@ -348,6 +348,7 @@ def main():
             match_threshold=float(synth_cfg.get("match_threshold", 0.1)),
             device=device,
             seed=int(tcfg.get("seed", 42)),
+            nnv5_chunk_size=int(synth_cfg.get("nnv5_chunk_size", 16)),
         )
         # Add projection parameters to optimizer
         optimizer.add_param_group({"params": list(synth_harness.projection_parameters())})

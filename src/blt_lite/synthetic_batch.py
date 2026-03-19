@@ -369,14 +369,16 @@ class SyntheticBatchHarness:
         match_threshold: float,
         device: torch.device,
         seed: int = 42,
+        nnv5_chunk_size: int = 16,
     ):
-        self.model          = model
-        self.d_model        = d_model
-        self.bool_dim       = bool_dim
-        self.n_synthetic    = n_synthetic
+        self.model           = model
+        self.d_model         = d_model
+        self.bool_dim        = bool_dim
+        self.n_synthetic     = n_synthetic
         self.match_threshold = match_threshold
-        self.device         = device
-        self.rng            = np.random.default_rng(seed)
+        self.device          = device
+        self.nnv5_chunk_size = nnv5_chunk_size
+        self.rng             = np.random.default_rng(seed)
 
         self.projection = BoolProjection(d_model, bool_dim).to(device)
         self.nnv5       = NNv5Block(bool_dim, case_capacity, group_capacity)
@@ -399,20 +401,29 @@ class SyntheticBatchHarness:
     def update_case_table(self, hidden: torch.Tensor):
         """
         Run NNv5 forward + assign on the current batch's hidden states.
-        Updates the persistent case table.
+        Processes inputs in chunks so cases built from early chunks are
+        available for matching by later chunks within the same batch.
 
         hidden: (B, T, D) float
         """
-        # Project to bool
         bool_vecs = self.projection.encode_hard(hidden.reshape(-1, self.d_model))
+        N = bool_vecs.shape[0]
+        chunk = self.nnv5_chunk_size
+        all_choices = []
 
-        # NNv5 forward
-        diff, emit, was_matched, choices, _ = self.nnv5.forward(bool_vecs)
+        for start in range(0, N, chunk):
+            chunk_vecs = bool_vecs[start:start + chunk]
+            diff, emit, was_matched, choices, _ = self.nnv5.forward(chunk_vecs)
+            self.nnv5.assign(diff, emit, was_matched)
+            all_choices.append(choices)
 
-        # Update case table
-        self.nnv5.assign(diff, emit, was_matched)
-
-        return choices
+        # Pad choices to uniform case count for the caller
+        # (case count grows during chunking so shapes differ)
+        max_cases = max(c.shape[1] for c in all_choices) if all_choices else 0
+        padded = [
+            np.pad(c, ((0, 0), (0, max_cases - c.shape[1]))) for c in all_choices
+        ]
+        return np.concatenate(padded, axis=0) if padded else np.zeros((N, 0), dtype=bool)
 
     def synthetic_pass(
         self,
