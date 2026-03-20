@@ -382,10 +382,15 @@ class NNv5Block:
         overlap = (emit_pos_input[:, None, :] & emit_pos_cases[None, :, :]).any(axis=2)  # (N, C)
 
         match_pos = self.match[0, :, :C]         # (match_words, C)
-        result = np.zeros((N, self.match_words), dtype=np.uint64)
-        for n in range(N):
-            if overlap[n].any():
-                result[n] = np.bitwise_or.reduce(match_pos[:, overlap[n]], axis=1)
+        # Vectorized OR: mask match cols by overlap, reduce over C
+        # overlap: (N, C), match_pos: (match_words, C) → need (N, C, match_words)
+        match_pos_t = match_pos.T                # (C, match_words)
+        masked = np.where(
+            overlap[:, :, None],                 # (N, C, 1)
+            match_pos_t[None, :, :],             # (1, C, match_words)
+            np.uint64(0)
+        )                                        # (N, C, match_words)
+        result = np.bitwise_or.reduce(masked, axis=1)  # (N, match_words)
 
         return result
 
@@ -986,12 +991,14 @@ class SyntheticBatchHarness:
         emit_pos = nnv5.emit[0, :C]
         per_row_emit = np.zeros((M, nnv5.emit_words), dtype=np.uint64)
         if C > 0 and choices_full.shape[1] > 0:
-            matched = choices_full[:, :C]
-            per_row_emit = np.array([
-                np.bitwise_or.reduce(emit_pos[matched[m]], axis=0)
-                if matched[m].any() else per_row_emit[m]
-                for m in range(M)
-            ], dtype=np.uint64)
+            matched = choices_full[:, :C]                              # (M, C)
+            # Vectorized OR: mask emit rows by choices, reduce over C
+            masked = np.where(
+                matched[:, :, None],                                   # (M, C, 1)
+                emit_pos[None, :, :],                                  # (1, C, EW)
+                np.uint64(0)
+            )                                                          # (M, C, EW)
+            per_row_emit = np.bitwise_or.reduce(masked, axis=1)       # (M, EW)
 
 
         return per_row_emit, buf
@@ -1088,15 +1095,13 @@ class SyntheticBatchHarness:
         else:
             _, _, _, choices1, _ = self.nnv5_l1.forward(chunked1)
 
-        C1       = self.nnv5_l1.array_used
+        C1        = self.nnv5_l1.array_used
         emit_pos1 = self.nnv5_l1.emit[0, :C1]
         emit1_rows = np.zeros((N * n_chunks1, self.nnv5_l1.emit_words), dtype=np.uint64)
         if C1 > 0 and choices1.shape[1] > 0:
             m = choices1[:, :C1]
-            emit1_rows = np.array([
-                np.bitwise_or.reduce(emit_pos1[m[i]], axis=0) if m[i].any() else emit1_rows[i]
-                for i in range(N * n_chunks1)
-            ], dtype=np.uint64)
+            masked1 = np.where(m[:, :, None], emit_pos1[None, :, :], np.uint64(0))
+            emit1_rows = np.bitwise_or.reduce(masked1, axis=1)
 
         # --- Synthesis via reverse pipeline ---
         if self.nnv5_l2.array_used == 0:
@@ -1122,10 +1127,8 @@ class SyntheticBatchHarness:
         l2_emit_rows_flat = np.zeros((N * n_chunks2, self.nnv5_l2.emit_words), dtype=np.uint64)
         if C2 > 0 and choices2.shape[1] > 0:
             m2 = choices2[:, :C2]
-            l2_emit_rows_flat = np.array([
-                np.bitwise_or.reduce(emit_pos2[m2[i]], axis=0) if m2[i].any() else l2_emit_rows_flat[i]
-                for i in range(N * n_chunks2)
-            ], dtype=np.uint64)
+            masked2 = np.where(m2[:, :, None], emit_pos2[None, :, :], np.uint64(0))
+            l2_emit_rows_flat = np.bitwise_or.reduce(masked2, axis=1)
 
         # Aggregate L2 emit to per-position — OR over chunks
         l2_emit_per_pos = np.zeros((N, self.nnv5_l2.emit_words), dtype=np.uint64)
