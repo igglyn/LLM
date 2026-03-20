@@ -1098,6 +1098,10 @@ class SyntheticBatchHarness:
                 for i in range(N * n_chunks1)
             ], dtype=np.uint64)
 
+        # --- Synthesis via reverse pipeline ---
+        if self.nnv5_l2.array_used == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+
         # Synthesize from layer2
         n_chunks2    = self.n_chunks2
         chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
@@ -1105,49 +1109,27 @@ class SyntheticBatchHarness:
         target_words = n_chunks2 * chunk_words2
         if emit1_flat.shape[1] < target_words:
             emit1_flat = np.pad(emit1_flat, ((0,0),(0, target_words - emit1_flat.shape[1])))
+
         emit1_chunked = emit1_flat.reshape(N * n_chunks2, chunk_words2)
-
-        # --- Synthesis via reverse pipeline ---
-        # Step 1: sample noise emit from L2 groups
-        # Use forward on real inputs to get their L2 emit, then perturb
-        if self.nnv5_l2.array_used == 0:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-
-        use_torch = self.device.type == "cuda"
-
-        # Get L1 chunked emit for real inputs
         if use_torch:
-            _, _, _, choices1, _ = self.nnv5_l1.forward_torch(chunked1, self.device)
+            _, _, _, choices2, _ = self.nnv5_l2.forward_torch(emit1_chunked, self.device)
         else:
-            _, _, _, choices1, _ = self.nnv5_l1.forward(chunked1)
+            _, _, _, choices2, _ = self.nnv5_l2.forward(emit1_chunked)
 
-        C1        = self.nnv5_l1.array_used
-        emit_pos1 = self.nnv5_l1.emit[0, :C1]
-        emit1_rows = np.zeros((N * n_chunks1, self.nnv5_l1.emit_words), dtype=np.uint64)
-        if C1 > 0 and choices1.shape[1] > 0:
-            m = choices1[:, :C1]
-            emit1_rows = np.array([
-                np.bitwise_or.reduce(emit_pos1[m[i]], axis=0) if m[i].any() else emit1_rows[i]
-                for i in range(N * n_chunks1)
+        # Extract per-row L2 emit from choices
+        C2        = self.nnv5_l2.array_used
+        emit_pos2 = self.nnv5_l2.emit[0, :C2]
+        l2_emit_rows_flat = np.zeros((N * n_chunks2, self.nnv5_l2.emit_words), dtype=np.uint64)
+        if C2 > 0 and choices2.shape[1] > 0:
+            m2 = choices2[:, :C2]
+            l2_emit_rows_flat = np.array([
+                np.bitwise_or.reduce(emit_pos2[m2[i]], axis=0) if m2[i].any() else l2_emit_rows_flat[i]
+                for i in range(N * n_chunks2)
             ], dtype=np.uint64)
-
-        # Reshape to per-position L2 input
-        n_chunks2    = self.n_chunks2
-        chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
-        emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
-        target_words = n_chunks2 * chunk_words2
-        if emit1_flat.shape[1] < target_words:
-            emit1_flat = np.pad(emit1_flat, ((0, 0), (0, target_words - emit1_flat.shape[1])))
-
-        emit1_chunked = emit1_flat.reshape(N * n_chunks2, chunk_words2)
-        if use_torch:
-            _, l2_emit_out, _, _, _ = self.nnv5_l2.forward_torch(emit1_chunked, self.device)
-        else:
-            _, l2_emit_out, _, _, _ = self.nnv5_l2.forward(emit1_chunked)
 
         # Aggregate L2 emit to per-position — OR over chunks
         l2_emit_per_pos = np.zeros((N, self.nnv5_l2.emit_words), dtype=np.uint64)
-        l2_emit_rows = l2_emit_out.reshape(N, n_chunks2, self.nnv5_l2.emit_words)
+        l2_emit_rows = l2_emit_rows_flat.reshape(N, n_chunks2, self.nnv5_l2.emit_words)
         for i in range(n_chunks2):
             l2_emit_per_pos |= l2_emit_rows[:, i, :]
 
