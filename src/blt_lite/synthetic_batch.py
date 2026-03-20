@@ -369,9 +369,6 @@ class NNv5Block:
         """
         Reconstruct inputs from emit group membership vectors.
 
-        Given per-input emit bitsets, find all cases belonging to those groups
-        and OR their positive match patterns to produce reconstructed inputs.
-
         emit:    (N, 2, emit_words) uint64
         returns: (N, match_words) uint64 — reconstructed positive pattern
         """
@@ -384,70 +381,58 @@ class NNv5Block:
         emit_pos_input = emit[:, 0]              # (N, emit_words)
         emit_pos_cases = self.emit[0, :C]        # (C, emit_words)
 
-        # member[n, c] = any group bit overlap between input n and case c
-        overlap = (emit_pos_input[:, None, :] & emit_pos_cases[None, :, :]).any(axis=2)  # (N, C)
+        # Unpack both to bit vectors for matmul overlap detection
+        input_bits = np.unpackbits(
+            emit_pos_input.view(np.uint8), axis=1, bitorder='little'
+        ).astype(np.float32)                     # (N, emit_words*64)
+        case_bits = np.unpackbits(
+            emit_pos_cases.view(np.uint8), axis=1, bitorder='little'
+        ).astype(np.float32)                     # (C, emit_words*64)
 
+        # Overlap: (N, emit_words*64) @ (emit_words*64, C) → (N, C)
+        overlap = (input_bits @ case_bits.T) > 0  # (N, C) bool
+
+        # OR match patterns of overlapping cases via matmul
         match_pos = self.match[0, :, :C]         # (match_words, C)
-        # Vectorized OR: mask match cols by overlap, reduce over C
-        # overlap: (N, C), match_pos: (match_words, C) → need (N, C, match_words)
-        match_pos_t = match_pos.T                # (C, match_words)
-        masked = np.where(
-            overlap[:, :, None],                 # (N, C, 1)
-            match_pos_t[None, :, :],             # (1, C, match_words)
-            np.uint64(0)
-        )                                        # (N, C, match_words)
-        result = np.bitwise_or.reduce(masked, axis=1)  # (N, match_words)
+        match_bits = np.unpackbits(
+            match_pos.T.view(np.uint8), axis=1, bitorder='little'
+        ).astype(np.float32)                     # (C, match_words*64)
+
+        # (N, C) @ (C, match_words*64) → (N, match_words*64)
+        result_bits = (overlap.astype(np.float32) @ match_bits) > 0
+        result = np.packbits(
+            result_bits.astype(np.uint8), axis=1, bitorder='little'
+        ).view(np.uint64)[:, :self.match_words]
 
         return result
 
     def synthesize_from(self, packed_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """
-        Generate synthetic packed uint64 vectors anchored to real input positions.
+        Generate synthetic packed uint64 vectors via vocab-masked noise.
 
-        packed_vecs: (N, match_words) uint64
+        ORs all positive match patterns to form a vocabulary mask, then
+        generates random uint64 noise constrained to that mask. Fast and
+        scales naturally to cross-batch use.
+
+        packed_vecs: (N, match_words) uint64 — used only for shape/dtype
         returns:     (N, match_words) uint64
         """
+        N = packed_vecs.shape[0]
         if self.array_used == 0 or self.emit_used == 0:
             return packed_vecs.copy()
 
-        N = packed_vecs.shape[0]
         C = self.array_used
-        G = self.emit_used
-        emit_pos = self.emit[0, :C]   # (C, emit_words)
+        # Build vocabulary mask — OR of all positive match patterns
+        vocab = np.bitwise_or.reduce(self.match[0, :, :C], axis=1)  # (match_words,)
 
-        _, _, _, choices, _ = self.forward(packed_vecs)  # (N, C)
+        # Generate noise and constrain to vocabulary
+        noise = rng.integers(
+            np.iinfo(np.uint64).min, np.iinfo(np.uint64).max,
+            size=(N, self.match_words), dtype=np.uint64
+        )
+        noise &= vocab[None, :]
 
-        # Unpack group membership bits for all cases — (C, G) bool
-        case_group_pos = np.zeros((C, G), dtype=bool)
-        for g in range(G):
-            word, bit = divmod(g, 64)
-            flag = np.uint64(1) << np.uint64(bit)
-            case_group_pos[:, g] = (emit_pos[:, word] & flag) != 0
-
-        input_groups = choices @ case_group_pos   # (N, G)
-        reachable    = (input_groups > 0) @ case_group_pos.T  # (N, C)
-
-        results   = packed_vecs.copy()
-        pos_match = self.match[0, :, :C]  # (match_words, C)
-        neg_match = self.match[1, :, :C]
-
-        for i in range(N):
-            if not choices[i].any():
-                continue
-
-            member_idxs = np.where(reachable[i])[0]
-            if len(member_idxs) == 0:
-                continue
-
-            n_sample = max(1, rng.integers(1, len(member_idxs) + 1))
-            sampled  = rng.choice(member_idxs, size=n_sample, replace=False)
-
-            synth = packed_vecs[i].copy()
-            synth |= np.bitwise_or.reduce(pos_match[:, sampled], axis=1)
-            synth &= ~np.bitwise_or.reduce(neg_match[:, sampled], axis=1)
-            results[i] = synth
-
-        return results
+        return noise
 
     def stats(self) -> dict:
         return {
@@ -571,66 +556,95 @@ class NNv2Block:
     def compress_range(self, nnv5: "NNv5Block", start: int, end: int):
         """
         Run NNv2 compression on a range of NNv5 cases [start, end).
-        Called once per NNv5 chunk with only the newly added cases.
+        Uses snapshot batching — all new cases processed against a snapshot
+        of the table taken before the batch starts. Accepts dedup risk.
         """
         if nnv5.emit_used == 0 or start >= end:
             return
 
-        for ci in range(start, end):
-            src_match_pos = nnv5.match[0, :, ci]   # (bool_dim,)
-            src_match_neg = nnv5.match[1, :, ci]
-            src_emit_pos  = nnv5.emit[0, ci]        # (emit_words,)
-            src_emit_neg  = nnv5.emit[1, ci]
+        n_new = end - start
+        E     = self.array_used  # snapshot size
 
-            # --- REDUCE: find existing case with identical emit ---
-            reduced = False
-            for ei in range(self.array_used):
-                if self._emit_rows_equal(
-                    self._emit_pos(ei), self._emit_neg(ei),
-                    src_emit_pos, src_emit_neg,
-                ):
-                    # Merge match patterns via AND (tighten constraints)
-                    self.match[0, :, ei] &= src_match_pos
-                    self.match[1, :, ei] &= src_match_neg
-                    # Average float affinities of merged cases
-                    src_aff = np.zeros(self.group_capacity, dtype=np.float32)
-                    self._init_float_emit_to(src_aff, src_emit_pos)
-                    self.float_emit[ei] = (self.float_emit[ei] + src_aff) * 0.5
-                    reduced = True
-                    break
+        # Extract new case batch
+        src_match_pos = nnv5.match[0, :, start:end]   # (match_words, n_new)
+        src_match_neg = nnv5.match[1, :, start:end]
+        src_emit_pos  = nnv5.emit[0, start:end]        # (n_new, emit_words)
+        src_emit_neg  = nnv5.emit[1, start:end]
 
-            if reduced:
+        if E == 0:
+            # No existing cases — append all
+            n = min(n_new, self.case_capacity)
+            self.match[0, :, :n] = src_match_pos[:, :n]
+            self.match[1, :, :n] = src_match_neg[:, :n]
+            self.emit[0, :n]     = src_emit_pos[:n]
+            self.emit[1, :n]     = src_emit_neg[:n]
+            for i in range(n):
+                self._init_float_emit(i, src_emit_pos[i])
+            self.array_used = n
+            return
+
+        # Snapshot existing emit arrays
+        snap_emit_pos = self.emit[0, :E].copy()  # (E, emit_words)
+        snap_emit_neg = self.emit[1, :E].copy()
+
+        # --- REDUCE: for each new case find exact emit match in snapshot ---
+        # Compare (n_new, emit_words) vs (E, emit_words)
+        # reduce_match[i, j] = True if new case i matches existing case j
+        reduce_match = np.all(
+            src_emit_pos[:, None, :] == snap_emit_pos[None, :, :], axis=2
+        ) & np.all(
+            src_emit_neg[:, None, :] == snap_emit_neg[None, :, :], axis=2
+        )  # (n_new, E)
+
+        # --- SPLIT: for each new case find superset emit in snapshot ---
+        # superset[i, j] = existing j positive is superset of new i positive
+        # AND they are not identical (handled by reduce)
+        superset = np.all(
+            (snap_emit_pos[None, :, :] & src_emit_pos[:, None, :]) == src_emit_pos[:, None, :],
+            axis=2
+        ) & ~reduce_match  # (n_new, E)
+
+        # Process each new case
+        for i in range(n_new):
+            src_mp = src_match_pos[:, i]
+            src_mn = src_match_neg[:, i]
+            src_ep = src_emit_pos[i]
+            src_en = src_emit_neg[i]
+
+            # REDUCE
+            reduce_cols = np.where(reduce_match[i])[0]
+            if reduce_cols.size > 0:
+                ei = reduce_cols[0]
+                self.match[0, :, ei] &= src_mp
+                self.match[1, :, ei] &= src_mn
+                src_aff = np.zeros(self.group_capacity, dtype=np.float32)
+                self._init_float_emit_to(src_aff, src_ep)
+                self.float_emit[ei] = (self.float_emit[ei] + src_aff) * 0.5
                 continue
 
-            # --- SPLIT: find existing case whose positive emit is superset ---
-            split = False
-            for ei in range(self.array_used):
-                existing_pos = self._emit_pos(ei)
-                existing_neg = self._emit_neg(ei)
-                if not np.array_equal(existing_pos & src_emit_pos, src_emit_pos):
-                    continue
-                if np.array_equal(existing_pos, src_emit_pos):
-                    continue  # identical — handled by reduce
+            # SPLIT
+            split_cols = np.where(superset[i])[0]
+            split_done = False
+            for ei in split_cols:
+                existing_pos = snap_emit_pos[ei]
+                existing_neg = snap_emit_neg[ei]
 
-                sub_a_pos = existing_pos & src_emit_pos
-                sub_a_neg = existing_neg | src_emit_neg
-                sub_b_pos = existing_pos & ~src_emit_pos
+                sub_a_pos = existing_pos & src_ep
+                sub_a_neg = existing_neg | src_en
+                sub_b_pos = existing_pos & ~src_ep
                 sub_b_neg = existing_neg
 
                 if (self._has_pos_and_neg(sub_a_pos, sub_a_neg) and
                         self._has_pos_and_neg(sub_b_pos, sub_b_neg)):
-                    # Waterfall split of float affinities
                     parent_aff = self.float_emit[ei].copy()
                     a_aff, b_aff = self._waterfall_split(parent_aff, sub_a_pos, sub_b_pos)
 
-                    # Replace existing with subcase A
                     self.emit[0, ei] = sub_a_pos
                     self.emit[1, ei] = sub_a_neg
-                    self.match[0, :, ei] &= src_match_pos
-                    self.match[1, :, ei] &= src_match_neg
+                    self.match[0, :, ei] &= src_mp
+                    self.match[1, :, ei] &= src_mn
                     self.float_emit[ei] = a_aff
 
-                    # Append subcase B (newer — gets remainder)
                     if self.array_used < self.case_capacity:
                         bi = self.array_used
                         self.match[0, :, bi] = self.match[0, :, ei]
@@ -640,20 +654,20 @@ class NNv2Block:
                         self.float_emit[bi] = b_aff
                         self.array_used += 1
 
-                    split = True
+                    split_done = True
                     break
 
-            if split:
+            if split_done:
                 continue
 
-            # --- APPEND: new case ---
+            # APPEND
             if self.array_used < self.case_capacity:
                 idx = self.array_used
-                self.match[0, :, idx] = src_match_pos
-                self.match[1, :, idx] = src_match_neg
-                self.emit[0, idx] = src_emit_pos
-                self.emit[1, idx] = src_emit_neg
-                self._init_float_emit(idx, src_emit_pos)
+                self.match[0, :, idx] = src_mp
+                self.match[1, :, idx] = src_mn
+                self.emit[0, idx] = src_ep
+                self.emit[1, idx] = src_en
+                self._init_float_emit(idx, src_ep)
                 self.array_used += 1
 
     def forward(self, tokens: np.ndarray):
@@ -883,6 +897,7 @@ class SyntheticBatchHarness:
 
         self.captured_hidden: torch.Tensor | None = None
         self._hook = None
+        self._last_update_step = -1
 
         # Persistent input buffers — accumulate across LLM batches
         # flushed to NNv5 when they reach nnv5_chunk_size
@@ -977,14 +992,18 @@ class SyntheticBatchHarness:
         emit_pos = nnv5.emit[0, :C]
         per_row_emit = np.zeros((M, nnv5.emit_words), dtype=np.uint64)
         if C > 0 and choices_full.shape[1] > 0:
-            matched = choices_full[:, :C]                              # (M, C)
-            # Vectorized OR: mask emit rows by choices, reduce over C
-            masked = np.where(
-                matched[:, :, None],                                   # (M, C, 1)
-                emit_pos[None, :, :],                                  # (1, C, EW)
-                np.uint64(0)
-            )                                                          # (M, C, EW)
-            per_row_emit = np.bitwise_or.reduce(masked, axis=1)       # (M, EW)
+            matched = choices_full[:, :C].astype(np.float32)        # (M, C)
+            # Unpack emit_pos bits: (C, EW) uint64 → (C, EW*64) float32
+            emit_bits = np.unpackbits(
+                emit_pos.view(np.uint8), axis=1, bitorder='little'
+            ).astype(np.float32)                                     # (C, EW*64)
+            # Matmul: (M, C) @ (C, EW*64) → (M, EW*64)
+            # Any matched case contributing a 1 bit → sum > 0
+            result_bits = (matched @ emit_bits) > 0                  # (M, EW*64) bool
+            # Repack to uint64
+            per_row_emit = np.packbits(
+                result_bits.astype(np.uint8), axis=1, bitorder='little'
+            ).view(np.uint64)[:, :nnv5.emit_words]
 
 
         return per_row_emit, buf
@@ -1051,8 +1070,9 @@ class SyntheticBatchHarness:
         targets:     (B, T)    int64
         step:        int       — current training step
         """
-        # Only update case tables for first nnv5_update_steps steps
-        if step <= self.nnv5_update_steps:
+        # Only update case tables for first nnv5_update_steps steps — once per model step
+        if step <= self.nnv5_update_steps and step != self._last_update_step:
+            self._last_update_step = step
             self.update_case_table(real_hidden)
             if step == self.nnv5_update_steps:
                 print(f"  NNv5 tables frozen at step {step} — "
@@ -1085,9 +1105,10 @@ class SyntheticBatchHarness:
         emit_pos1 = self.nnv5_l1.emit[0, :C1]
         emit1_rows = np.zeros((N * n_chunks1, self.nnv5_l1.emit_words), dtype=np.uint64)
         if C1 > 0 and choices1.shape[1] > 0:
-            m = choices1[:, :C1]
-            masked1 = np.where(m[:, :, None], emit_pos1[None, :, :], np.uint64(0))
-            emit1_rows = np.bitwise_or.reduce(masked1, axis=1)
+            m        = choices1[:, :C1].astype(np.float32)
+            ebits1   = np.unpackbits(emit_pos1.view(np.uint8), axis=1, bitorder='little').astype(np.float32)
+            rbits1   = (m @ ebits1) > 0
+            emit1_rows = np.packbits(rbits1.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l1.emit_words]
 
         # --- Synthesis via reverse pipeline ---
         if self.nnv5_l2.array_used == 0:
@@ -1112,9 +1133,10 @@ class SyntheticBatchHarness:
         emit_pos2 = self.nnv5_l2.emit[0, :C2]
         l2_emit_rows_flat = np.zeros((N * n_chunks2, self.nnv5_l2.emit_words), dtype=np.uint64)
         if C2 > 0 and choices2.shape[1] > 0:
-            m2 = choices2[:, :C2]
-            masked2 = np.where(m2[:, :, None], emit_pos2[None, :, :], np.uint64(0))
-            l2_emit_rows_flat = np.bitwise_or.reduce(masked2, axis=1)
+            m2       = choices2[:, :C2].astype(np.float32)
+            ebits2   = np.unpackbits(emit_pos2.view(np.uint8), axis=1, bitorder='little').astype(np.float32)
+            rbits2   = (m2 @ ebits2) > 0
+            l2_emit_rows_flat = np.packbits(rbits2.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l2.emit_words]
 
         # Aggregate L2 emit to per-position — OR over chunks
         l2_emit_per_pos = np.zeros((N, self.nnv5_l2.emit_words), dtype=np.uint64)
