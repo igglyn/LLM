@@ -29,60 +29,8 @@ from __future__ import annotations
 import functools
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
-
-
-# ---------------------------------------------------------------------------
-# Bool Projection (float → bool, bool → float)
-# ---------------------------------------------------------------------------
-
-class BoolProjection(nn.Module):
-    """
-    Learned projection between float hidden states and bool vectors.
-
-    Forward:  (B, T, d_model) → (B, T, bool_dim)  bool tensor
-    Inverse:  (B, T, bool_dim) → (B, T, d_model)  float tensor
-
-    The forward uses straight-through estimator so gradients flow
-    through the threshold during backprop.
-    """
-    def __init__(self, d_model: int, bool_dim: int):
-        super().__init__()
-        self.d_model  = d_model
-        self.bool_dim = bool_dim
-        self.to_bool  = nn.Linear(d_model, bool_dim)
-        self.to_float = nn.Linear(bool_dim, d_model)
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, T, d_model) float
-        returns: (B, T, bool_dim) bool (straight-through in training)
-        """
-        logits = self.to_bool(x)
-        soft   = torch.sigmoid(logits)
-        # Straight-through: hard in forward, soft gradient in backward
-        hard   = (soft > 0.5).float()
-        return hard + (soft - soft.detach())
-
-    def decode(self, b: torch.Tensor) -> torch.Tensor:
-        """
-        b: (B, T, bool_dim) float (0/1 or soft)
-        returns: (B, T, d_model) float
-        """
-        return self.to_float(b)
-
-    def encode_hard(self, x: torch.Tensor) -> np.ndarray:
-        """
-        Hard bool encoding for NNv5 — no gradients.
-        returns: uint8 numpy array (B*T, bool_dim)
-        """
-        with torch.no_grad():
-            logits = self.to_bool(x)
-            hard   = (torch.sigmoid(logits) > 0.5).cpu().numpy().astype(np.uint8)
-        return hard.reshape(-1, self.bool_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -91,13 +39,13 @@ class BoolProjection(nn.Module):
 
 class NNv5Block:
     """
-    Thin wrapper around the NNv5 U1XToU1X logic operating on bool arrays.
+    NNv5 U1XToU1X logic operating on packed uint64 arrays.
 
-    Accepts and returns numpy uint8 arrays where each element is 0 or 1,
-    handling the bitpacking internally.
+    bool_dim specifies the number of bits. Internally bits are packed into
+    ceil(bool_dim / 64) uint64 words per case. Inversion uses bitwise NOT
+    which correctly flips all bits simultaneously.
 
-    The case table persists across calls — call assign() after forward()
-    to update the table with new structure.
+    The case table persists across calls.
     """
     def __init__(self, bool_dim: int, case_capacity: int, group_capacity: int):
         self.bool_dim       = bool_dim
@@ -106,14 +54,15 @@ class NNv5Block:
 
         self.array_used = 0
         self.emit_used  = 0
-        self.emit_words = (group_capacity + 63) // 64
+        self.match_words = (bool_dim + 63) // 64
+        self.emit_words  = (group_capacity + 63) // 64
 
-        # match: (2, bool_dim, case_capacity)  uint8
-        # plane 0 = positive (must be present)
-        # plane 1 = negative (must be absent)
-        self.match = np.zeros((2, bool_dim, case_capacity), dtype=np.uint8)
+        # match: (2, match_words, case_capacity) uint64
+        # plane 0 = positive (required bits)
+        # plane 1 = negative (forbidden bits)
+        self.match = np.zeros((2, self.match_words, case_capacity), dtype=np.uint64)
 
-        # emit: (2, case_capacity, emit_words)  uint64
+        # emit: (2, case_capacity, emit_words) uint64
         self.emit = np.zeros((2, case_capacity, self.emit_words), dtype=np.uint64)
 
     def _set_emit_group_bit(self, case_idx, group_idx: int, *, is_member: bool):
@@ -125,34 +74,33 @@ class NNv5Block:
 
     def forward(self, tokens: np.ndarray):
         """
-        tokens: (N, bool_dim) uint8
+        tokens: (N, match_words) uint64 — packed bit representation
         returns: (diff, emit, was_matched, choices, activation_counts)
         """
         if self.array_used == 0:
             n = tokens.shape[0]
-            tokens_inv = 1 - tokens
-            inp = np.stack((tokens, tokens_inv), axis=1)       # (N, 2, bool_dim)
-            # Deduplicate
+            tokens_inv = ~tokens.copy()
+            inp = np.stack((tokens, tokens_inv), axis=1)       # (N, 2, match_words)
             inp2, idxs = np.unique(inp, axis=0, return_index=True)
             diff        = inp2
             emit        = np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64)
-            was_matched = np.zeros(inp2.shape[0], dtype=bool)  # nothing matched
+            was_matched = np.zeros(inp2.shape[0], dtype=bool)
             choices     = np.zeros((n, 0), dtype=bool)
             counts      = np.zeros(0, dtype=np.uint64)
             return diff, emit, was_matched, choices, counts
 
-        tokens_inv = 1 - tokens                                     # (N, bool_dim)
-        inp = np.stack((tokens, tokens_inv), axis=1)                # (N, 2, bool_dim)
+        tokens_inv = ~tokens.copy()                                 # (N, match_words)
+        inp = np.stack((tokens, tokens_inv), axis=1)                # (N, 2, match_words)
 
-        match_view = self.match[None, ..., :self.array_used]        # (1, 2, D, C)
-        inp_exp    = inp[..., None]                                  # (N, 2, D, 1)
+        match_view = self.match[None, ..., :self.array_used]        # (1, 2, W, C)
+        inp_exp    = inp[..., None]                                  # (N, 2, W, 1)
 
-        selection = inp_exp & match_view                            # (N, 2, D, C)
+        selection = inp_exp & match_view                            # (N, 2, W, C)
         choices   = (selection == match_view).all((1, 2))           # (N, C)
 
         was_matched = choices.any(axis=1)                           # (N,)
 
-        emit_view = self.emit[None, :, :self.array_used]            # (1, 2, C, W)
+        emit_view = self.emit[None, :, :self.array_used]            # (1, 2, C, EW)
         emit_broad = np.broadcast_to(
             emit_view,
             (tokens.shape[0], 2, self.array_used, self.emit_words),
@@ -166,10 +114,9 @@ class NNv5Block:
         )
         emit_out[~was_matched] = np.uint64(0)
 
-        # Reverse: reconstruct input from matched cases
         match_broad = np.broadcast_to(
             match_view,
-            (tokens.shape[0], 2, self.bool_dim, self.array_used),
+            (tokens.shape[0], 2, self.match_words, self.array_used),
         )
         reverse = np.bitwise_or.reduce(
             match_broad, axis=3,
@@ -178,16 +125,14 @@ class NNv5Block:
 
         diff = reverse & inp ^ inp
 
-        # Filter trivial diffs
         non_zero = diff[:, 0].any(axis=1)
         diff_cul = diff[non_zero]
         emit_cul = emit_out[non_zero]
         was_matched_cul = was_matched[non_zero]
 
-        # Deduplicate
         if diff_cul.shape[0] > 0:
             diff_cul2, idxs = np.unique(diff_cul, axis=0, return_index=True)
-            emit_cul2       = emit_cul[idxs]
+            emit_cul2        = emit_cul[idxs]
             was_matched_cul2 = was_matched_cul[idxs]
         else:
             diff_cul2, emit_cul2, was_matched_cul2 = diff_cul, emit_cul, was_matched_cul
@@ -207,11 +152,11 @@ class NNv5Block:
         Uses int64 bitwise ops (reinterpreting uint64 emit arrays).
         Returns numpy arrays for assign compatibility.
 
-        tokens: (N, bool_dim) uint8 numpy array
+        tokens: (N, match_words) uint64 numpy array
         """
         if self.array_used == 0:
             n = tokens.shape[0]
-            tokens_inv = 1 - tokens
+            tokens_inv = ~tokens.copy()
             inp = np.stack((tokens, tokens_inv), axis=1)
             inp2, idxs = np.unique(inp, axis=0, return_index=True)
             diff        = inp2
@@ -224,20 +169,24 @@ class NNv5Block:
         C = self.array_used
         N = tokens.shape[0]
 
-        # Zero-copy view as torch — match stays uint8, emit reinterpreted as int64
-        t_match = torch.from_numpy(self.match[:, :, :C]).to(device)          # (2, D, C) uint8
+        # Reinterpret uint64 as int64 for torch — bitwise ops work identically
+        t_match = torch.from_numpy(
+            self.match[:, :, :C].view(np.int64)
+        ).to(device)                                                           # (2, W, C) int64
         t_emit  = torch.from_numpy(
             self.emit[:, :C].view(np.int64)
-        ).to(device)                                                           # (2, C, W) int64
+        ).to(device)                                                           # (2, C, EW) int64
 
-        t_inp = torch.from_numpy(
-            np.stack((tokens, 1 - tokens), axis=1).copy()
-        ).to(device)                                                           # (N, 2, D) uint8
+        # Bitwise NOT for inversion — same as ~tokens on uint64
+        tokens_np  = tokens.view(np.int64)
+        t_inp_pos  = torch.from_numpy(tokens_np.copy()).to(device)            # (N, W)
+        t_inp_neg  = ~t_inp_pos                                                # (N, W)
+        t_inp      = torch.stack((t_inp_pos, t_inp_neg), dim=1)               # (N, 2, W)
 
         # --- FORWARD: subset match ---
-        inp_exp    = t_inp.unsqueeze(-1)                                       # (N, 2, D, 1)
-        match_view = t_match.unsqueeze(0)                                      # (1, 2, D, C)
-        selection  = inp_exp & match_view                                      # (N, 2, D, C)
+        inp_exp    = t_inp.unsqueeze(-1)                                       # (N, 2, W, 1)
+        match_view = t_match.unsqueeze(0)                                      # (1, 2, W, C)
+        selection  = inp_exp & match_view                                      # (N, 2, W, C)
         choices_t  = (selection == match_view).all(dim=(1, 2))                # (N, C)
         was_matched_t = choices_t.any(dim=1)                                  # (N,)
 
@@ -267,21 +216,28 @@ class NNv5Block:
         emit_out_t[~was_matched_t] = 0
 
         # --- REVERSE: OR match patterns of matched cases ---
-        # choices_t: (N, C) → (N, 1, 1, C), match: (1, 2, D, C)
         cho_exp  = choices_t.unsqueeze(1).unsqueeze(1)                        # (N, 1, 1, C)
-        mat_exp  = t_match.unsqueeze(0)                                        # (1, 2, D, C)
+        mat_exp  = t_match.unsqueeze(0)                                        # (1, 2, W, C)
         contrib  = torch.where(
-            cho_exp.expand(N, 2, self.bool_dim, C),
-            mat_exp.expand(N, 2, self.bool_dim, C),
-            torch.zeros(1, dtype=torch.uint8, device=device).expand(N, 2, self.bool_dim, C),
+            cho_exp.expand(N, 2, self.match_words, C),
+            mat_exp.expand(N, 2, self.match_words, C),
+            torch.zeros(1, dtype=torch.int64, device=device).expand(N, 2, self.match_words, C),
         )
-        reverse_t = contrib.any(dim=3).to(torch.uint8)                        # (N, 2, D)
+        reverse_t = contrib.any(dim=3)                                         # (N, 2, W) — wrong, need OR not any
+        # Use bitwise OR reduction over cases dimension
+        reverse_t = functools.reduce(
+            torch.bitwise_or,
+            [torch.where(choices_t[:, ci:ci+1].unsqueeze(2),
+                         t_match[:, :, ci:ci+1].permute(2, 0, 1).expand(N, 2, self.match_words),
+                         torch.zeros(N, 2, self.match_words, dtype=torch.int64, device=device))
+             for ci in range(C)]
+        ) if C > 0 else torch.zeros(N, 2, self.match_words, dtype=torch.int64, device=device)
 
         diff_t = reverse_t & t_inp ^ t_inp
 
-        # Back to numpy
+        # Back to numpy — reinterpret int64 as uint64
         choices_np     = choices_t.cpu().numpy()
-        diff_np        = diff_t.cpu().numpy()
+        diff_np        = diff_t.cpu().numpy().view(np.uint64)
         emit_out_np    = emit_out_t.cpu().numpy().view(np.uint64)
         was_matched_np = was_matched_t.cpu().numpy()
 
@@ -305,13 +261,12 @@ class NNv5Block:
     def assign_candidates(self, diff: np.ndarray, emit: np.ndarray, was_matched: np.ndarray) -> tuple:
         """
         Process diffs into candidate cases without committing to the table.
-        Returns (neg_case, new_cases, new_cases_emit, new_group_cases) for
-        downstream NNv2 processing or direct commit.
+        diff: (K, 2, match_words) uint64
         """
         if diff.shape[0] == 0:
-            empty = np.zeros((0, 2, self.bool_dim), dtype=np.uint8)
+            empty      = np.zeros((0, 2, self.match_words), dtype=np.uint64)
             empty_emit = np.zeros((0, 2, self.emit_words), dtype=np.uint64)
-            neg_case = np.ones(self.bool_dim, dtype=np.uint8)
+            neg_case   = np.full(self.match_words, np.iinfo(np.uint64).max, dtype=np.uint64)
             return neg_case, empty, empty_emit, empty
 
         neg_case = np.bitwise_and.reduce(diff[:, 1], axis=0)
@@ -322,7 +277,7 @@ class NNv5Block:
             new_case_mask   = diff2[:, 0].any(axis=1).all(axis=1)
             neg_cols = np.where(~diffed_neg_mask)[0]
             if neg_cols.size > 0:
-                self.match[1, np.arange(self.bool_dim)[:, None], neg_cols[None, :]] &= neg_case[:, None]
+                self.match[1, np.arange(self.match_words)[:, None], neg_cols[None, :]] &= neg_case[:, None]
         else:
             new_case_mask = np.ones(diff.shape[0], dtype=bool)
 
@@ -404,74 +359,22 @@ class NNv5Block:
 
         return affinities
 
-    def synthesize(self, n: int, rng: np.random.Generator) -> np.ndarray:
+    def synthesize_from(self, packed_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """
-        Generate n synthetic bool vectors by combining case patterns.
+        Generate synthetic packed uint64 vectors anchored to real input positions.
 
-        For each synthetic example:
-            - Sample a group affinity target (random weighted combination)
-            - Find cases belonging to sampled groups
-            - OR their positive match patterns together
-            - Apply negative constraints (zero out negative bits)
-
-        returns: (n, bool_dim) uint8
+        packed_vecs: (N, match_words) uint64
+        returns:     (N, match_words) uint64
         """
         if self.array_used == 0 or self.emit_used == 0:
-            return rng.integers(0, 2, size=(n, self.bool_dim), dtype=np.uint8)
+            return packed_vecs.copy()
 
-        results = np.zeros((n, self.bool_dim), dtype=np.uint8)
-
-        for i in range(n):
-            # Sample a random subset of groups to target
-            n_groups = rng.integers(1, max(2, self.emit_used))
-            target_groups = rng.choice(self.emit_used, size=n_groups, replace=False)
-
-            # Find cases that are members of any target group
-            emit_pos = self.emit[0, :self.array_used]
-            emit_neg = self.emit[1, :self.array_used]
-            member_mask = np.zeros(self.array_used, dtype=bool)
-
-            for g in target_groups:
-                word, bit = divmod(g, 64)
-                flag = np.uint64(1) << np.uint64(bit)
-                member_mask |= ((emit_pos[:, word] & flag) != 0)
-
-            if not member_mask.any():
-                # Fall back to random if no cases found
-                results[i] = rng.integers(0, 2, size=self.bool_dim, dtype=np.uint8)
-                continue
-
-            # OR positive match patterns of member cases
-            pos_patterns = self.match[0, :, :self.array_used][:, member_mask]  # (D, K)
-            synth = np.bitwise_or.reduce(pos_patterns, axis=1)                 # (D,)
-
-            # Apply negative constraints: zero bits required to be absent
-            neg_patterns = self.match[1, :, :self.array_used][:, member_mask]
-            neg_union = np.bitwise_or.reduce(neg_patterns, axis=1)
-            synth &= ~neg_union
-
-            results[i] = synth
-
-        return results
-
-    def synthesize_from(self, bool_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        """
-        Generate synthetic bool vectors anchored to real input positions.
-        Vectorized — computes group memberships and case masks in batch.
-
-        bool_vecs: (N, bool_dim) uint8
-        returns:   (N, bool_dim) uint8 synthetic vectors
-        """
-        if self.array_used == 0 or self.emit_used == 0:
-            return bool_vecs.copy()
-
-        N = bool_vecs.shape[0]
+        N = packed_vecs.shape[0]
         C = self.array_used
         G = self.emit_used
-        emit_pos = self.emit[0, :C]   # (C, W)
+        emit_pos = self.emit[0, :C]   # (C, emit_words)
 
-        # Run forward to get choices for all inputs at once
-        _, _, _, choices, _ = self.forward(bool_vecs)  # (N, C)
+        _, _, _, choices, _ = self.forward(packed_vecs)  # (N, C)
 
         # Unpack group membership bits for all cases — (C, G) bool
         case_group_pos = np.zeros((C, G), dtype=bool)
@@ -480,32 +383,25 @@ class NNv5Block:
             flag = np.uint64(1) << np.uint64(bit)
             case_group_pos[:, g] = (emit_pos[:, word] & flag) != 0
 
-        # For each input: which groups does it belong to via matched cases?
-        # choices: (N, C), case_group_pos: (C, G) → input_groups: (N, G)
-        input_groups = choices @ case_group_pos  # (N, G) — count of matched cases per group
+        input_groups = choices @ case_group_pos   # (N, G)
+        reachable    = (input_groups > 0) @ case_group_pos.T  # (N, C)
 
-        # For each input: which cases are reachable via its groups?
-        # input_groups > 0: (N, G), case_group_pos: (C, G) → reachable: (N, C)
-        reachable = (input_groups > 0) @ case_group_pos.T  # (N, C)
-
-        # Build synthetic vectors
-        results = bool_vecs.copy()
-        pos_match = self.match[0, :, :C]  # (D, C)
-        neg_match = self.match[1, :, :C]  # (D, C)
+        results   = packed_vecs.copy()
+        pos_match = self.match[0, :, :C]  # (match_words, C)
+        neg_match = self.match[1, :, :C]
 
         for i in range(N):
             if not choices[i].any():
-                continue  # unmatched — keep original
+                continue
 
             member_idxs = np.where(reachable[i])[0]
             if len(member_idxs) == 0:
                 continue
 
-            # Random subset of reachable cases
             n_sample = max(1, rng.integers(1, len(member_idxs) + 1))
             sampled  = rng.choice(member_idxs, size=n_sample, replace=False)
 
-            synth = bool_vecs[i].copy()
+            synth = packed_vecs[i].copy()
             synth |= np.bitwise_or.reduce(pos_match[:, sampled], axis=1)
             synth &= ~np.bitwise_or.reduce(neg_match[:, sampled], axis=1)
             results[i] = synth
@@ -545,23 +441,19 @@ class NNv2Block:
     instead of being committed directly.
     """
     def __init__(self, bool_dim: int, group_capacity: int, case_capacity: int):
-        self.bool_dim       = bool_dim
+        self.bool_dim       = bool_dim   # bits
+        self.match_words    = (bool_dim + 63) // 64
         self.group_capacity = group_capacity
         self.case_capacity  = case_capacity
         self.emit_words     = (group_capacity + 63) // 64
 
         self.array_used = 0
 
-        # match: (2, bool_dim, case_capacity) uint8
-        self.match = np.zeros((2, bool_dim, case_capacity), dtype=np.uint8)
-        # emit: (2, case_capacity, emit_words) uint64 — group membership bitsets
+        # match: (2, match_words, case_capacity) uint64
+        self.match = np.zeros((2, self.match_words, case_capacity), dtype=np.uint64)
+        # emit: (2, case_capacity, emit_words) uint64
         self.emit  = np.zeros((2, case_capacity, self.emit_words), dtype=np.uint64)
         # float_emit: (case_capacity, group_capacity) float32
-        # Per-case affinity weight per group — used for weighted synthesis.
-        # Initialised to 1.0 for positive member groups, 0.0 otherwise.
-        # On Reduce: average the affinities of merged cases.
-        # On Split: older subcase keeps its affinities, newer gets remainder
-        #           (waterfall-with-half, respecting case age via insertion order).
         self.float_emit = np.zeros((case_capacity, group_capacity), dtype=np.float32)
 
     def _emit_pos(self, idx) -> np.ndarray:
@@ -728,12 +620,12 @@ class NNv2Block:
         Same forward pass as NNv5 — subset match on bool arrays.
         Used when NNv2 takes over from NNv5 as primary case handler.
 
-        tokens: (N, bool_dim) uint8
+        tokens: (N, match_words) uint64
         returns: (diff, emit, was_matched, choices)
         """
         if self.array_used == 0:
             n = tokens.shape[0]
-            tokens_inv = 1 - tokens
+            tokens_inv = ~tokens.copy()
             inp = np.stack((tokens, tokens_inv), axis=1)
             inp2, idxs = np.unique(inp, axis=0, return_index=True)
             return (inp2,
@@ -741,9 +633,9 @@ class NNv2Block:
                     np.zeros(inp2.shape[0], dtype=bool),
                     np.zeros((n, 0), dtype=bool))
 
-        tokens_inv = 1 - tokens
-        inp = np.stack((tokens, tokens_inv), axis=1)         # (N, 2, D)
-        match_view = self.match[None, ..., :self.array_used] # (1, 2, D, C)
+        tokens_inv = ~tokens.copy()
+        inp = np.stack((tokens, tokens_inv), axis=1)         # (N, 2, W)
+        match_view = self.match[None, ..., :self.array_used] # (1, 2, W, C)
         selection  = inp[..., None] & match_view
         choices    = (selection == match_view).all((1, 2))   # (N, C)
         was_matched = choices.any(axis=1)
@@ -760,7 +652,7 @@ class NNv2Block:
         emit_out[~was_matched] = np.uint64(0)
 
         match_broad = np.broadcast_to(
-            match_view, (tokens.shape[0], 2, self.bool_dim, self.array_used)
+            match_view, (tokens.shape[0], 2, self.match_words, self.array_used)
         )
         reverse = np.bitwise_or.reduce(
             match_broad, axis=3, where=choices[:, None, None, :]
@@ -819,23 +711,25 @@ class NNv2Block:
                     max_group = g + 1
             nnv5.emit_used = max_group
 
-    def synthesize_from(self, bool_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    def synthesize_from(self, packed_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """
-        Generate synthetic bool vectors anchored to real input positions.
-        Uses float affinities for weighted case sampling during synthesis.
+        Generate synthetic packed uint64 vectors.
+        Uses float affinities for weighted case sampling.
+
+        packed_vecs: (N, match_words) uint64
+        returns:     (N, match_words) uint64
         """
         if self.array_used == 0:
-            return bool_vecs.copy()
+            return packed_vecs.copy()
 
-        N = bool_vecs.shape[0]
-        results = np.zeros((N, self.bool_dim), dtype=np.uint8)
+        N        = packed_vecs.shape[0]
+        results  = packed_vecs.copy()
         emit_pos = self.emit[0, :self.array_used]
 
-        _, _, _, choices = self.forward(bool_vecs)
+        _, _, _, choices = self.forward(packed_vecs)
 
         for i in range(N):
             if choices.shape[1] == 0 or not choices[i].any():
-                results[i] = bool_vecs[i]
                 continue
 
             matched_emit = emit_pos[choices[i]]
@@ -847,10 +741,8 @@ class NNv2Block:
                     member_groups.append(g)
 
             if not member_groups:
-                results[i] = bool_vecs[i]
                 continue
 
-            # Find cases in member groups — weighted by float affinity
             member_mask = np.zeros(self.array_used, dtype=bool)
             for g in member_groups:
                 word, bit = divmod(g, 64)
@@ -859,7 +751,6 @@ class NNv2Block:
 
             member_idxs = np.where(member_mask)[0]
 
-            # Weight by sum of float affinities across member groups
             weights = np.array([
                 self.float_emit[idx, member_groups].sum()
                 for idx in member_idxs
@@ -871,25 +762,21 @@ class NNv2Block:
                 weights = np.ones(len(member_idxs), dtype=np.float32) / len(member_idxs)
 
             n_sample = max(1, rng.integers(1, len(member_idxs) + 1))
-            sampled = rng.choice(member_idxs, size=n_sample, replace=False, p=weights)
+            sampled  = rng.choice(member_idxs, size=n_sample, replace=False, p=weights)
 
-            synth = bool_vecs[i].copy()
+            synth = packed_vecs[i].copy()
             for idx in sampled:
                 synth |= self.match[0, :, idx]
-
-            neg_union = np.zeros(self.bool_dim, dtype=np.uint8)
+            neg_union = np.zeros(self.match_words, dtype=np.uint64)
             for idx in sampled:
                 neg_union |= self.match[1, :, idx]
             synth &= ~neg_union
-
             results[i] = synth
 
         return results
 
 
 
-
-from dataclasses import dataclass
 
 @dataclass
 class NNv5LayerConfig:
@@ -975,6 +862,13 @@ class SyntheticBatchHarness:
         self.captured_hidden: torch.Tensor | None = None
         self._hook = None
 
+        # Persistent input buffers — accumulate across LLM batches
+        # flushed to NNv5 when they reach nnv5_chunk_size
+        l1_match_words = (layer1.chunk_dim + 63) // 64
+        l2_match_words = (layer2.chunk_dim + 63) // 64
+        self._buf_l1 = np.empty((0, l1_match_words), dtype=np.uint64)
+        self._buf_l2 = np.empty((0, l2_match_words), dtype=np.uint64)
+
     def attach(self):
         """Register forward hook to capture trunk hidden states."""
         def _hook_fn(module, inp, out):
@@ -989,45 +883,56 @@ class SyntheticBatchHarness:
 
     def _hidden_to_bool(self, hidden: torch.Tensor) -> np.ndarray:
         """
-        Convert float hidden states to bool arrays by thresholding at 0.
-        No learned projection — direct quantization.
+        Convert float hidden states to packed uint64 bool arrays.
+        Threshold at 0 — positive activations become 1 bits.
 
         hidden: (N, d_model) float
-        returns: (N, d_model) uint8
+        returns: (N, match_words) uint64  where match_words = ceil(d_model / 64)
         """
-        return (hidden > 0).cpu().numpy().astype(np.uint8)
+        N      = hidden.shape[0]
+        bits   = (hidden > 0).cpu().numpy().astype(bool)   # (N, d_model)
+        n_bits = bits.shape[1]
+        words  = (n_bits + 63) // 64
+        # Pad to multiple of 64
+        if n_bits % 64 != 0:
+            pad  = 64 - (n_bits % 64)
+            bits = np.pad(bits, ((0, 0), (0, pad)))
+        # Pack 64 bits per uint64 word — LSB first
+        packed = np.packbits(bits, axis=1, bitorder='little')  # (N, words*8) uint8
+        return packed.view(np.uint64)                           # (N, words) uint64
 
     def _run_layer(
         self,
-        bool_vecs: np.ndarray,
+        packed_vecs: np.ndarray,
         nnv5: NNv5Block,
         nnv2: NNv2Block,
         chunk_dim: int,
         nnv5_chunk_size: int,
-    ) -> np.ndarray:
+        buf: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Run one NNv5+NNv2 layer on chunked bool inputs.
+        Run one NNv5+NNv2 layer on packed uint64 inputs with a persistent buffer.
 
-        bool_vecs: (N, input_dim) uint8
-        Reshapes to (N * n_chunks, chunk_dim) — all chunks batched into one
-        forward pass per NNv5 chunk step. Single NNv5 instance sees all chunks
-        simultaneously, encoding chunk position implicitly in case structure.
+        packed_vecs: (N, input_words) uint64  — already chunked (N = positions * n_chunks)
+        buf:         persistent buffer from previous calls
 
-        returns: (N, n_chunks * group_capacity) uint8 — per-input emit bits
+        Appends packed_vecs to buf. When buf reaches nnv5_chunk_size rows,
+        flushes to NNv5 forward+assign and clears flushed portion.
+
+        Returns:
+            per_row_emit: (N, emit_words) uint64 — emit output for current inputs
+            new_buf:      updated buffer (remaining unflushed inputs)
         """
-        N         = bool_vecs.shape[0]
-        input_dim = bool_vecs.shape[1]
-        n_chunks  = input_dim // chunk_dim
         use_torch = self.device.type == "cuda"
+        M         = packed_vecs.shape[0]
 
-        # Reshape: (N, input_dim) → (N * n_chunks, chunk_dim)
-        # Each row is one chunk — chunk identity encoded in NNv5 case structure
-        chunked = bool_vecs.reshape(N * n_chunks, chunk_dim)   # (N*K, chunk_dim)
+        # Append to buffer
+        buf = np.concatenate([buf, packed_vecs], axis=0) if buf.shape[0] > 0 else packed_vecs.copy()
 
-        # Process in NNv5 input chunks
-        M = chunked.shape[0]
-        for start in range(0, M, nnv5_chunk_size):
-            cv           = chunked[start:start + nnv5_chunk_size]
+        # Flush complete chunks from buffer
+        while buf.shape[0] >= nnv5_chunk_size:
+            cv           = buf[:nnv5_chunk_size]
+            buf          = buf[nnv5_chunk_size:]
             cases_before = nnv5.array_used
             nnv2_active  = nnv5.emit_used > 0
 
@@ -1048,70 +953,71 @@ class SyntheticBatchHarness:
                 nnv2.compress_range(nnv5, cases_before, cases_after)
                 nnv2.sync_to_nnv5(nnv5)
 
-        # Extract per-input emit bits — one forward pass on full chunked batch
+        # Emit extraction pass on current inputs only
         if use_torch:
-            _, _, _, choices_full, _ = nnv5.forward_torch(chunked, self.device)
+            _, _, _, choices_full, _ = nnv5.forward_torch(packed_vecs, self.device)
         else:
-            _, _, _, choices_full, _ = nnv5.forward(chunked)
+            _, _, _, choices_full, _ = nnv5.forward(packed_vecs)
 
-        # OR matched case emit bits per input row — (M, emit_words)
         C        = nnv5.array_used
-        emit_pos = nnv5.emit[0, :C]                              # (C, emit_words)
+        emit_pos = nnv5.emit[0, :C]
         per_row_emit = np.zeros((M, nnv5.emit_words), dtype=np.uint64)
         if C > 0 and choices_full.shape[1] > 0:
-            matched_counts = choices_full[:, :C]                 # (M, C)
-            # Vectorized OR: (M, emit_words)
+            matched = choices_full[:, :C]
             per_row_emit = np.array([
-                np.bitwise_or.reduce(emit_pos[matched_counts[m]], axis=0)
-                if matched_counts[m].any() else per_row_emit[m]
+                np.bitwise_or.reduce(emit_pos[matched[m]], axis=0)
+                if matched[m].any() else per_row_emit[m]
                 for m in range(M)
             ], dtype=np.uint64)
 
-        # Unpack to bits: (M, group_capacity) uint8
-        emit_bits = np.unpackbits(
-            per_row_emit.view(np.uint8), axis=1, bitorder='little'
-        )[:, :nnv5.group_capacity]                               # (M, group_capacity)
-
-        # Reshape back: (N * n_chunks, group_capacity) → (N, n_chunks * group_capacity)
-        return emit_bits.reshape(N, n_chunks * nnv5.group_capacity)
+        return per_row_emit, buf
 
     def update_case_table(self, hidden: torch.Tensor):
         """
         Run two-layer NNv5+NNv2 pipeline on the current batch's hidden states.
-
-        Layer 1: raw bool chunks of d_model → per-position emit bitsets
-        Layer 2: flat chunks of layer1 emit bits → higher-order group structure
-
-        NNv5 naturally encodes positional information into group structure
-        through subset matching — no explicit windowing needed.
+        Uses persistent buffers — NNv5 flushes independently of LLM batch size.
 
         hidden: (B, T, D) float
         """
-        flat = hidden.reshape(-1, self.d_model)
-        bool_vecs = self._hidden_to_bool(flat)           # (N, d_model) uint8
+        flat   = hidden.reshape(-1, self.d_model)
+        packed = self._hidden_to_bool(flat)          # (N, d_model_words) uint64
 
-        # Layer 1
-        emit1 = self._run_layer(
-            bool_vecs,
+        N        = packed.shape[0]
+        n_chunks1 = self.n_chunks1
+        chunk_words1 = (self.layer1_cfg.chunk_dim + 63) // 64
+
+        # Reshape to (N * n_chunks1, chunk_words1)
+        chunked1 = packed.reshape(N * n_chunks1, chunk_words1)
+
+        emit1_rows, self._buf_l1 = self._run_layer(
+            chunked1,
             self.nnv5_l1, self.nnv2_l1,
             self.layer1_cfg.chunk_dim,
             self.layer1_cfg.nnv5_chunk_size,
-        )                                                # (N, n_chunks1 * group_capacity1)
-
-        if emit1.shape[1] == 0:
+            self._buf_l1,
+        )
+        # emit1_rows: (N * n_chunks1, emit_words_l1)
+        # Reshape to (N, n_chunks1 * emit_words_l1) then to (N * n_chunks2, chunk_words2)
+        if emit1_rows.shape[0] == 0 or self.nnv5_l1.emit_used == 0:
             return
 
-        # Pad to chunk_dim2 boundary
-        pad = (-emit1.shape[1]) % self.layer2_cfg.chunk_dim
-        if pad > 0:
-            emit1 = np.pad(emit1, ((0, 0), (0, pad)))
+        n_chunks2    = self.n_chunks2
+        chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
+        emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
 
-        # Layer 2
-        self._run_layer(
-            emit1,
+        # Pad to chunk_words2 boundary
+        target_words = n_chunks2 * chunk_words2
+        if emit1_flat.shape[1] < target_words:
+            emit1_flat = np.pad(emit1_flat, ((0,0),(0, target_words - emit1_flat.shape[1])))
+
+        chunked2 = emit1_flat.reshape(N * n_chunks2, chunk_words2)
+
+        _, self._buf_l2 = self._run_layer(
+            chunked2,
             self.nnv5_l2, self.nnv2_l2,
             self.layer2_cfg.chunk_dim,
             self.layer2_cfg.nnv5_chunk_size,
+            self._buf_l2,
         )
 
     def synthetic_pass(
@@ -1140,54 +1046,67 @@ class SyntheticBatchHarness:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         B, T, D = real_hidden.shape
-        flat      = real_hidden.reshape(-1, D)
-        bool_vecs = self._hidden_to_bool(flat)           # (N, d_model)
+        flat   = real_hidden.reshape(-1, D)
+        packed = self._hidden_to_bool(flat)              # (N, d_model_words) uint64
+        N      = packed.shape[0]
 
-        # Get layer1 emit for real inputs
-        emit1 = self._run_layer(
-            bool_vecs,
-            self.nnv5_l1, self.nnv2_l1,
-            self.layer1_cfg.chunk_dim,
-            self.layer1_cfg.nnv5_chunk_size,
-        )
+        # Layer 1 emit for real inputs (read-only, don't update buffer)
+        n_chunks1    = self.n_chunks1
+        chunk_words1 = (self.layer1_cfg.chunk_dim + 63) // 64
+        chunked1     = packed.reshape(N * n_chunks1, chunk_words1)
 
-        if emit1.shape[1] == 0:
+        if self.nnv5_l1.array_used == 0:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
-        pad = (-emit1.shape[1]) % self.layer2_cfg.chunk_dim
-        if pad > 0:
-            emit1 = np.pad(emit1, ((0, 0), (0, pad)))
+        use_torch = self.device.type == "cuda"
+        if use_torch:
+            _, _, _, choices1, _ = self.nnv5_l1.forward_torch(chunked1, self.device)
+        else:
+            _, _, _, choices1, _ = self.nnv5_l1.forward(chunked1)
 
-        # Synthesize from layer2 — reshape emit1 to chunked, synthesize, reshape back
-        N          = bool_vecs.shape[0]
-        chunk_dim2 = self.layer2_cfg.chunk_dim
-        n_chunks2  = emit1.shape[1] // chunk_dim2
+        C1       = self.nnv5_l1.array_used
+        emit_pos1 = self.nnv5_l1.emit[0, :C1]
+        emit1_rows = np.zeros((N * n_chunks1, self.nnv5_l1.emit_words), dtype=np.uint64)
+        if C1 > 0 and choices1.shape[1] > 0:
+            m = choices1[:, :C1]
+            emit1_rows = np.array([
+                np.bitwise_or.reduce(emit_pos1[m[i]], axis=0) if m[i].any() else emit1_rows[i]
+                for i in range(N * n_chunks1)
+            ], dtype=np.uint64)
 
-        # Reshape emit1 to (N * n_chunks2, chunk_dim2) for single synthesize call
-        emit1_chunked = emit1.reshape(N * n_chunks2, chunk_dim2)
+        # Synthesize from layer2
+        n_chunks2    = self.n_chunks2
+        chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
+        emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
+        target_words = n_chunks2 * chunk_words2
+        if emit1_flat.shape[1] < target_words:
+            emit1_flat = np.pad(emit1_flat, ((0,0),(0, target_words - emit1_flat.shape[1])))
+        emit1_chunked = emit1_flat.reshape(N * n_chunks2, chunk_words2)
+
         if self.nnv2_l2.array_used > 0:
             synth_emit1_chunked = self.nnv2_l2.synthesize_from(emit1_chunked, self.rng)
         elif self.nnv5_l2.array_used > 0:
             synth_emit1_chunked = self.nnv5_l2.synthesize_from(emit1_chunked, self.rng)
         else:
             synth_emit1_chunked = emit1_chunked.copy()
-        # Reshape back: (N * n_chunks2, chunk_dim2) → (N, n_chunks2 * chunk_dim2)
-        synth_emit1 = synth_emit1_chunked.reshape(N, n_chunks2 * chunk_dim2)
 
-        # Synthesize layer1 bool — reshape to (N * n_chunks1, chunk_dim1), synthesize, reshape back
-        chunk_dim1 = self.layer1_cfg.chunk_dim
-        n_chunks1  = self.d_model // chunk_dim1
-        bool_chunked = bool_vecs.reshape(N * n_chunks1, chunk_dim1)
+        # Synthesize layer1 packed bool
         if self.nnv2_l1.array_used > 0:
-            synth_bool_chunked = self.nnv2_l1.synthesize_from(bool_chunked, self.rng)
+            synth_chunked1 = self.nnv2_l1.synthesize_from(chunked1, self.rng)
         elif self.nnv5_l1.array_used > 0:
-            synth_bool_chunked = self.nnv5_l1.synthesize_from(bool_chunked, self.rng)
+            synth_chunked1 = self.nnv5_l1.synthesize_from(chunked1, self.rng)
         else:
-            synth_bool_chunked = bool_chunked.copy()
-        synth_bool = synth_bool_chunked.reshape(N, self.d_model)
+            synth_chunked1 = chunked1.copy()
 
-        # Convert synthetic bool back to float hidden states — rescale to match real
-        synth_hidden = torch.from_numpy(synth_bool.astype(np.float32)).to(self.device)
+        # Unpack synthetic packed bool back to float hidden states
+        synth_packed = synth_chunked1.reshape(N, n_chunks1 * chunk_words1)  # (N, d_model_words)
+        # Unpack uint64 → bits → float
+        synth_bits = np.unpackbits(
+            synth_packed.view(np.uint8), axis=1, bitorder='little'
+        )[:, :self.d_model].astype(np.float32)               # (N, d_model)
+
+        # Rescale to match real hidden state distribution
+        synth_hidden = torch.from_numpy(synth_bits).to(self.device)
         real_flat    = flat.float()
         real_mean    = real_flat.mean(dim=0, keepdim=True)
         real_std     = real_flat.std(dim=0, keepdim=True) + 1e-8
