@@ -206,22 +206,20 @@ class NNv5Block:
             torch.full((1,), -1, dtype=torch.int64, device=device).expand(N, 2, C, self.emit_words),
         )
 
-        # AND reduce over case dimension — log-depth parallel (log2(C) steps vs C)
+        # AND reduce over case dimension — log-depth parallel
         x = masked_emit  # (N, 2, C, EW)
         while x.shape[2] > 1:
-            half = x.shape[2] // 2
-            even = x[:, :, :half * 2:2]   # (N, 2, half, EW)
-            odd  = x[:, :, 1:half * 2:2]
-            x    = even & odd
-            if half * 2 < x.shape[2]:     # odd C — fold remainder
-                x = torch.cat([x, masked_emit[:, :, -1:]], dim=2)
+            half  = x.shape[2] // 2
+            left  = x[:, :, :half]
+            right = x[:, :, half:half * 2]
+            x     = left & right
+            if x.shape[2] * 2 < masked_emit.shape[2]:  # odd original size — AND in last element
+                x[:, :, 0:1] &= masked_emit[:, :, -1:]
         emit_out_t = x[:, :, 0]
 
         emit_out_t[~was_matched_t] = 0
 
         # --- REVERSE: OR match patterns of matched cases ---
-        # choices_t: (N, C), t_match: (2, W, C)
-        # Mask match cols by choices, OR reduce over C — log-depth
         cho_exp = choices_t.unsqueeze(1).unsqueeze(1)                         # (N, 1, 1, C)
         mat_exp = t_match.unsqueeze(0)                                         # (1, 2, W, C)
         masked_match = torch.where(
@@ -233,12 +231,12 @@ class NNv5Block:
         # Log-depth OR reduction over C dimension
         y = masked_match  # (N, 2, W, C)
         while y.shape[3] > 1:
-            half = y.shape[3] // 2
-            even = y[:, :, :, :half * 2:2]
-            odd  = y[:, :, :, 1:half * 2:2]
-            y    = even | odd
-            if half * 2 < masked_match.shape[3]:
-                y = torch.cat([y, masked_match[:, :, :, -1:]], dim=3)
+            half  = y.shape[3] // 2
+            left  = y[:, :, :, :half]
+            right = y[:, :, :, half:half * 2]
+            y     = left | right
+            if y.shape[3] * 2 < masked_match.shape[3]:
+                y[:, :, :, 0:1] |= masked_match[:, :, :, -1:]
         reverse_t = y[:, :, :, 0]  # (N, 2, W)
 
         diff_t = reverse_t & t_inp ^ t_inp
