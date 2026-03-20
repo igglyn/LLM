@@ -914,7 +914,6 @@ class SyntheticBatchHarness:
         device: torch.device,
         seed: int = 42,
         nnv5_update_steps: int = 100,
-        emit_chunk_size: int = 64,
         synth_loss_weight: float = 0.5,
     ):
         # Validate chunk_dim constraint
@@ -929,7 +928,6 @@ class SyntheticBatchHarness:
         self.match_threshold   = match_threshold
         self.device            = device
         self.nnv5_update_steps = nnv5_update_steps
-        self.emit_chunk_size   = emit_chunk_size
         self.synth_loss_weight = synth_loss_weight
         self.rng               = np.random.default_rng(seed)
 
@@ -1026,7 +1024,7 @@ class SyntheticBatchHarness:
                 nnv2_active  = nnv5.emit_used > 0
 
                 if use_torch:
-                    diff, emit, was_matched, choices, _ = nnv5.forward_torch(cv, self.device, self.emit_chunk_size)
+                    diff, emit, was_matched, choices, _ = nnv5.forward_torch(cv, self.device)
                 else:
                     diff, emit, was_matched, choices, _ = nnv5.forward(cv)
 
@@ -1045,7 +1043,7 @@ class SyntheticBatchHarness:
             # Extract emit bits for this chunk — unpack uint64 to uint8 bits
             # Use final NNv5 forward pass to get per-input emit
             if use_torch:
-                _, emit_out, _, _, _ = nnv5.forward_torch(chunk_vecs, self.device, self.emit_chunk_size)
+                _, emit_out, _, _, _ = nnv5.forward_torch(chunk_vecs, self.device)
             else:
                 _, emit_out, _, _, _ = nnv5.forward(chunk_vecs)
 

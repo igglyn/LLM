@@ -368,7 +368,6 @@ def main():
             device=device,
             seed=int(tcfg.get("seed", 42)),
             nnv5_update_steps=int(synth_cfg.get("nnv5_update_steps", 100)),
-            emit_chunk_size=int(synth_cfg.get("emit_chunk_size", 64)),
             synth_loss_weight=float(synth_cfg.get("synth_loss_weight", 0.5)),
         )
         synth_harness.attach()
