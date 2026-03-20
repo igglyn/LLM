@@ -108,6 +108,8 @@ class NNv5Block:
             merged_match[g]   |= match2[i]
 
         return merged_diff, merged_emit, merged_match
+
+    def _set_emit_group_bit(self, case_idx, group_idx: int, *, is_member: bool):
         assert 0 <= group_idx < self.group_capacity
         word, bit = divmod(group_idx, 64)
         flag = np.uint64(1) << np.uint64(bit)
