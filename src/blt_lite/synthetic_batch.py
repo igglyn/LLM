@@ -395,7 +395,7 @@ class NNv5Block:
         # OR match patterns of overlapping cases via matmul
         match_pos = self.match[0, :, :C]         # (match_words, C)
         match_bits = np.unpackbits(
-            match_pos.T.view(np.uint8), axis=1, bitorder='little'
+            np.ascontiguousarray(match_pos.T).view(np.uint8), axis=1, bitorder='little'
         ).astype(np.float32)                     # (C, match_words*64)
 
         # (N, C) @ (C, match_words*64) → (N, match_words*64)
