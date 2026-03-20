@@ -1040,18 +1040,30 @@ class SyntheticBatchHarness:
                     nnv2.compress_range(nnv5, cases_before, cases_after)
                     nnv2.sync_to_nnv5(nnv5)
 
-            # Extract emit bits for this chunk — unpack uint64 to uint8 bits
-            # Use final NNv5 forward pass to get per-input emit
+            # Extract per-input emit bits using choices matrix
+            # forward() returns filtered diffs — need a separate choices pass
             if use_torch:
-                _, emit_out, _, _, _ = nnv5.forward_torch(chunk_vecs, self.device)
+                _, _, _, choices_full, _ = nnv5.forward_torch(chunk_vecs, self.device)
             else:
-                _, emit_out, _, _, _ = nnv5.forward(chunk_vecs)
+                _, _, _, choices_full, _ = nnv5.forward(chunk_vecs)
 
-            # Unpack emit bits: (N, 2, emit_words) → (N, group_capacity) uint8
+            # Aggregate emit: for each input OR the positive emit of all matched cases
+            # choices_full: (N, C), emit pos: (C, emit_words)
+            C = nnv5.array_used
+            emit_pos = nnv5.emit[0, :C]                          # (C, emit_words)
+            # Per-input emit: OR over matched cases — (N, emit_words)
+            per_input_emit = np.zeros((N, nnv5.emit_words), dtype=np.uint64)
+            if C > 0 and choices_full.shape[1] > 0:
+                for n in range(N):
+                    matched = choices_full[n, :C]
+                    if matched.any():
+                        per_input_emit[n] = np.bitwise_or.reduce(emit_pos[matched], axis=0)
+
+            # Unpack to (N, group_capacity) uint8 bool bits
             emit_bits = np.unpackbits(
-                emit_out[:, 0].view(np.uint8),
+                per_input_emit.view(np.uint8),
                 axis=1, bitorder='little'
-            )[:, :nnv5.emit_used]                        # (N, emit_used)
+            )[:, :nnv5.group_capacity]                           # (N, group_capacity)
             emit_parts.append(emit_bits)
 
         # Concatenate emit bits from all chunks
