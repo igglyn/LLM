@@ -1078,12 +1078,12 @@ class SyntheticBatchHarness:
             self._last_update_step = step
             self.update_case_table(real_hidden)
             if step == self.nnv5_update_steps:
+                l2_str = f" | L2 cases={self.nnv5_l2.array_used} groups={self.nnv5_l2.emit_used}" if self.layer2_enabled and self.nnv5_l2 is not None else ""
                 print(f"  NNv5 tables frozen at step {step} — "
-                      f"L1 cases={self.nnv5_l1.array_used} groups={self.nnv5_l1.emit_used} | "
-                      f"L2 cases={self.nnv5_l2.array_used} groups={self.nnv5_l2.emit_used}")
+                      f"L1 cases={self.nnv5_l1.array_used} groups={self.nnv5_l1.emit_used}{l2_str}")
 
-        # Check layer2 has any structure to synthesize from
-        if self.nnv5_l2.array_used == 0:
+        # Check layer1 has any structure to synthesize from
+        if self.nnv5_l1.array_used == 0:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         B, T, D = real_hidden.shape
@@ -1108,14 +1108,12 @@ class SyntheticBatchHarness:
         emit_pos1 = self.nnv5_l1.emit[0, :C1]
         emit1_rows = np.zeros((N * n_chunks1, self.nnv5_l1.emit_words), dtype=np.uint64)
         if C1 > 0 and choices1.shape[1] > 0:
-            m        = choices1[:, :C1].astype(np.float32)
-            ebits1   = np.unpackbits(emit_pos1.view(np.uint8), axis=1, bitorder='little').astype(np.float32)
-            rbits1   = (m @ ebits1) > 0
-            emit1_rows = np.packbits(rbits1.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l1.emit_words]
+            m = choices1[:, :C1]
+            masked1 = np.where(m[:, :, None], emit_pos1[None, :, :], np.uint64(0))
+            emit1_rows = np.bitwise_or.reduce(masked1, axis=1)
 
         # --- Synthesis ---
-        if self.layer2_enabled and self.nnv5_l2 is not None and self.nnv5_l2.array_used > 0:
-            # Full two-layer reverse pipeline
+        if self.layer2_enabled and self.nnv5_l2 is not None and self.nnv5_l2.array_used > 0:            # Full two-layer reverse pipeline
             n_chunks2    = self.n_chunks2
             chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
             emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
