@@ -722,8 +722,7 @@ class NNv2Block:
     def sync_to_nnv5(self, nnv5: "NNv5Block"):
         """
         Replace NNv5's active case table with NNv2's compressed table.
-        NNv5's forward pass then matches against NNv2's smaller case set,
-        making subsequent forward passes cheaper.
+        NNv5's forward pass then matches against NNv2's smaller case set.
         Groups and emit_used are preserved — only case arrays are replaced.
         """
         n = self.array_used
@@ -732,25 +731,6 @@ class NNv2Block:
         nnv5.match[:, :, :n] = self.match[:, :, :n]
         nnv5.emit[:, :n]     = self.emit[:, :n]
         nnv5.array_used      = n
-        # Sync emit_used so NNv5 doesn't allocate new groups beyond NNv2's compressed count
-        max_group = 0
-        for ci in range(n):
-            for g in range(self.group_capacity):
-                word, bit = divmod(g, 64)
-                flag = np.uint64(1) << np.uint64(bit)
-                if (self.emit[0, ci, word] & flag) != 0:
-                    max_group = max(max_group, g + 1)
-        nnv5.emit_used = max_group
-        # Derive actual group count from NNv2's emit positive bits
-        if n > 0:
-            emit_pos = self.emit[0, :n]  # (n, emit_words)
-            max_group = 0
-            for g in range(nnv5.group_capacity):
-                word, bit = divmod(g, 64)
-                flag = np.uint64(1) << np.uint64(bit)
-                if (emit_pos[:, word] & flag).any():
-                    max_group = g + 1
-            nnv5.emit_used = max_group
 
     def synthesize_from(self, packed_vecs: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """
