@@ -1154,10 +1154,19 @@ class SyntheticBatchHarness:
             synth_packed    = synth_chunked1.reshape(N, n_chunks1 * chunk_words1)
 
         else:
-            # Layer 1 only — synthesize directly from L1 vocab noise
-            synth_packed = self.nnv5_l1.synthesize_from(
-                packed.reshape(N * n_chunks1, chunk_words1), self.rng
-            ).reshape(N, n_chunks1 * chunk_words1)
+            # Layer 1 only — use reverse pass from L1 emit
+            if self.nnv5_l1.array_used > 0 and self.nnv5_l1.emit_used > 0:
+                # Get L1 emit per chunk row
+                l1_emit_stacked = np.stack(
+                    [emit1_rows, np.zeros_like(emit1_rows)], axis=1
+                )  # (N*n_chunks1, 2, emit_words)
+                synth_chunked1 = self.nnv5_l1.reverse(l1_emit_stacked)  # (N*n_chunks1, chunk_words1)
+                synth_packed   = synth_chunked1.reshape(N, n_chunks1 * chunk_words1)
+            else:
+                # No structure yet — vocab noise fallback
+                synth_packed = self.nnv5_l1.synthesize_from(
+                    packed.reshape(N * n_chunks1, chunk_words1), self.rng
+                ).reshape(N, n_chunks1 * chunk_words1)
 
         # Unpack uint64 → bits → float
         synth_bits = np.unpackbits(
