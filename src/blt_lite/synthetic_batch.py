@@ -26,7 +26,6 @@ Config keys (under synthetic_batch in tiny.yaml):
 """
 from __future__ import annotations
 
-import functools
 import numpy as np
 import torch
 from dataclasses import dataclass
@@ -207,31 +206,40 @@ class NNv5Block:
             torch.full((1,), -1, dtype=torch.int64, device=device).expand(N, 2, C, self.emit_words),
         )
 
-        # AND reduce over case dimension — functools.reduce over slices
-        emit_out_t = functools.reduce(
-            torch.bitwise_and,
-            [masked_emit[:, :, ci] for ci in range(C)]
-        )
+        # AND reduce over case dimension — log-depth parallel (log2(C) steps vs C)
+        x = masked_emit  # (N, 2, C, EW)
+        while x.shape[2] > 1:
+            half = x.shape[2] // 2
+            even = x[:, :, :half * 2:2]   # (N, 2, half, EW)
+            odd  = x[:, :, 1:half * 2:2]
+            x    = even & odd
+            if half * 2 < x.shape[2]:     # odd C — fold remainder
+                x = torch.cat([x, masked_emit[:, :, -1:]], dim=2)
+        emit_out_t = x[:, :, 0]
 
         emit_out_t[~was_matched_t] = 0
 
         # --- REVERSE: OR match patterns of matched cases ---
-        cho_exp  = choices_t.unsqueeze(1).unsqueeze(1)                        # (N, 1, 1, C)
-        mat_exp  = t_match.unsqueeze(0)                                        # (1, 2, W, C)
-        contrib  = torch.where(
+        # choices_t: (N, C), t_match: (2, W, C)
+        # Mask match cols by choices, OR reduce over C — log-depth
+        cho_exp = choices_t.unsqueeze(1).unsqueeze(1)                         # (N, 1, 1, C)
+        mat_exp = t_match.unsqueeze(0)                                         # (1, 2, W, C)
+        masked_match = torch.where(
             cho_exp.expand(N, 2, self.match_words, C),
             mat_exp.expand(N, 2, self.match_words, C),
             torch.zeros(1, dtype=torch.int64, device=device).expand(N, 2, self.match_words, C),
-        )
-        reverse_t = contrib.any(dim=3)                                         # (N, 2, W) — wrong, need OR not any
-        # Use bitwise OR reduction over cases dimension
-        reverse_t = functools.reduce(
-            torch.bitwise_or,
-            [torch.where(choices_t[:, ci:ci+1].unsqueeze(2),
-                         t_match[:, :, ci:ci+1].permute(2, 0, 1).expand(N, 2, self.match_words),
-                         torch.zeros(N, 2, self.match_words, dtype=torch.int64, device=device))
-             for ci in range(C)]
-        ) if C > 0 else torch.zeros(N, 2, self.match_words, dtype=torch.int64, device=device)
+        )  # (N, 2, W, C)
+
+        # Log-depth OR reduction over C dimension
+        y = masked_match  # (N, 2, W, C)
+        while y.shape[3] > 1:
+            half = y.shape[3] // 2
+            even = y[:, :, :, :half * 2:2]
+            odd  = y[:, :, :, 1:half * 2:2]
+            y    = even | odd
+            if half * 2 < masked_match.shape[3]:
+                y = torch.cat([y, masked_match[:, :, :, -1:]], dim=3)
+        reverse_t = y[:, :, :, 0]  # (N, 2, W)
 
         diff_t = reverse_t & t_inp ^ t_inp
 
