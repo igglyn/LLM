@@ -97,7 +97,8 @@ class NNv5Block:
         merged_diff  = np.zeros((n_g, 2, mw), dtype=np.uint64)
         merged_emit  = np.zeros((n_g, 2, ew), dtype=np.uint64)
         merged_match = np.zeros(n_g, dtype=bool)
-        merged_diff[:, 1] = np.iinfo(np.uint64).max  # AND identity
+        merged_diff[:, 1]  = np.iinfo(np.uint64).max  # AND identity for neg plane
+        merged_emit[:, 1]  = np.iinfo(np.uint64).max  # AND identity for neg emit
 
         for i in range(diff2.shape[0]):
             g = inv[i]
