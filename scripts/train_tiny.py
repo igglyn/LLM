@@ -442,8 +442,8 @@ def main():
                 print(f"step={step} train_loss={loss.item() * grad_accum_steps:.4f} lr={lr:.6f}")
                 if synth_harness is not None:
                     s = synth_harness.stats()
-                    print(f"  synth L1 cases={s['l1_cases']} groups={s['l1_groups']} nnv2={s['nnv2_l1_cases']} | "
-                          f"L2 cases={s['l2_cases']} groups={s['l2_groups']} nnv2={s['nnv2_l2_cases']}")
+                    l2_str = f" | L2 cases={s.get('l2_cases','N/A')} groups={s.get('l2_groups','N/A')} nnv2={s.get('nnv2_l2_cases','N/A')}" if 'l2_cases' in s else ""
+                    print(f"  synth L1 cases={s['l1_cases']} groups={s['l1_groups']} nnv2={s['nnv2_l1_cases']}{l2_str}")
 
             if step % eval_every == 0 and step > 0:
                 val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches) if use_cached_hidden else evaluate(model, val_loader, device, max_batches=eval_batches)

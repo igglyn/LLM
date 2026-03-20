@@ -857,12 +857,6 @@ class SyntheticBatchHarness:
         nnv5_update_steps: int = 100,
         synth_loss_weight: float = 0.5,
     ):
-        # Validate chunk_dim constraint
-        assert layer1.chunk_dim * layer2.chunk_dim == d_model, (
-            f"layer1.chunk_dim ({layer1.chunk_dim}) * layer2.chunk_dim ({layer2.chunk_dim}) "
-            f"must equal d_model ({d_model})"
-        )
-
         self.model             = model
         self.d_model           = d_model
         self.n_synthetic       = n_synthetic
@@ -874,37 +868,47 @@ class SyntheticBatchHarness:
 
         self.layer1_cfg = layer1
         self.layer2_cfg = layer2
+        self.layer2_enabled = layer2.case_capacity > 0
 
         # Derived dimensions
         n_chunks1 = d_model // layer1.chunk_dim
-        assert (layer1.group_capacity * n_chunks1) % layer2.chunk_dim == 0, (
-            f"layer2.chunk_dim ({layer2.chunk_dim}) must divide "
-            f"layer1 total emit bits ({layer1.group_capacity * n_chunks1})"
-        )
-        layer2_input_width = layer1.group_capacity * n_chunks1
-        n_chunks2          = layer2_input_width // layer2.chunk_dim
+        self.n_chunks1 = n_chunks1
 
-        self.n_chunks1          = n_chunks1
-        self.n_chunks2          = n_chunks2
-        self.layer2_input_width = layer2_input_width
-
-        # Single NNv5+NNv2 instance per layer — all chunks batched together (for assign)
+        # Single NNv5+NNv2 instance for layer 1
         self.nnv5_l1 = NNv5Block(layer1.chunk_dim, layer1.case_capacity, layer1.group_capacity)
         self.nnv2_l1 = NNv2Block(layer1.chunk_dim, layer1.group_capacity, layer1.nnv2_case_capacity)
-        self.nnv5_l2 = NNv5Block(layer2.chunk_dim, layer2.case_capacity, layer2.group_capacity)
-        self.nnv2_l2 = NNv2Block(layer2.chunk_dim, layer2.group_capacity, layer2.nnv2_case_capacity)
+
+        # Layer 2 — only if enabled
+        if self.layer2_enabled:
+            assert (layer1.group_capacity * n_chunks1) % layer2.chunk_dim == 0, (
+                f"layer2.chunk_dim ({layer2.chunk_dim}) must divide "
+                f"layer1 total emit bits ({layer1.group_capacity * n_chunks1})"
+            )
+            layer2_input_width = layer1.group_capacity * n_chunks1
+            n_chunks2          = layer2_input_width // layer2.chunk_dim
+            self.n_chunks2          = n_chunks2
+            self.layer2_input_width = layer2_input_width
+            self.nnv5_l2 = NNv5Block(layer2.chunk_dim, layer2.case_capacity, layer2.group_capacity)
+            self.nnv2_l2 = NNv2Block(layer2.chunk_dim, layer2.group_capacity, layer2.nnv2_case_capacity)
+        else:
+            self.n_chunks2          = 0
+            self.layer2_input_width = 0
+            self.nnv5_l2 = None
+            self.nnv2_l2 = None
 
 
         self.captured_hidden: torch.Tensor | None = None
         self._hook = None
         self._last_update_step = -1
 
-        # Persistent input buffers — accumulate across LLM batches
-        # flushed to NNv5 when they reach nnv5_chunk_size
+        # Persistent input buffers
         l1_match_words = (layer1.chunk_dim + 63) // 64
-        l2_match_words = (layer2.chunk_dim + 63) // 64
         self._buf_l1 = np.empty((0, l1_match_words), dtype=np.uint64)
-        self._buf_l2 = np.empty((0, l2_match_words), dtype=np.uint64)
+        if self.layer2_enabled:
+            l2_match_words = (layer2.chunk_dim + 63) // 64
+            self._buf_l2 = np.empty((0, l2_match_words), dtype=np.uint64)
+        else:
+            self._buf_l2 = None
 
     def attach(self):
         """Register forward hook to capture trunk hidden states."""
@@ -1035,14 +1039,13 @@ class SyntheticBatchHarness:
         )
         # emit1_rows: (N * n_chunks1, emit_words_l1)
         # Reshape to (N, n_chunks1 * emit_words_l1) then to (N * n_chunks2, chunk_words2)
-        if emit1_rows.shape[0] == 0 or self.nnv5_l1.emit_used == 0:
+        if emit1_rows.shape[0] == 0 or self.nnv5_l1.emit_used == 0 or not self.layer2_enabled:
             return
 
         n_chunks2    = self.n_chunks2
         chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
         emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
 
-        # Pad to chunk_words2 boundary
         target_words = n_chunks2 * chunk_words2
         if emit1_flat.shape[1] < target_words:
             emit1_flat = np.pad(emit1_flat, ((0,0),(0, target_words - emit1_flat.shape[1])))
@@ -1110,79 +1113,58 @@ class SyntheticBatchHarness:
             rbits1   = (m @ ebits1) > 0
             emit1_rows = np.packbits(rbits1.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l1.emit_words]
 
-        # --- Synthesis via reverse pipeline ---
-        if self.nnv5_l2.array_used == 0:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        # --- Synthesis ---
+        if self.layer2_enabled and self.nnv5_l2 is not None and self.nnv5_l2.array_used > 0:
+            # Full two-layer reverse pipeline
+            n_chunks2    = self.n_chunks2
+            chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
+            emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
+            target_words = n_chunks2 * chunk_words2
+            if emit1_flat.shape[1] < target_words:
+                emit1_flat = np.pad(emit1_flat, ((0,0),(0, target_words - emit1_flat.shape[1])))
 
-        # Synthesize from layer2
-        n_chunks2    = self.n_chunks2
-        chunk_words2 = (self.layer2_cfg.chunk_dim + 63) // 64
-        emit1_flat   = emit1_rows.reshape(N, n_chunks1 * self.nnv5_l1.emit_words)
-        target_words = n_chunks2 * chunk_words2
-        if emit1_flat.shape[1] < target_words:
-            emit1_flat = np.pad(emit1_flat, ((0,0),(0, target_words - emit1_flat.shape[1])))
+            emit1_chunked = emit1_flat.reshape(N * n_chunks2, chunk_words2)
+            if use_torch:
+                _, _, _, choices2, _ = self.nnv5_l2.forward_torch(emit1_chunked, self.device)
+            else:
+                _, _, _, choices2, _ = self.nnv5_l2.forward(emit1_chunked)
 
-        emit1_chunked = emit1_flat.reshape(N * n_chunks2, chunk_words2)
-        if use_torch:
-            _, _, _, choices2, _ = self.nnv5_l2.forward_torch(emit1_chunked, self.device)
+            C2        = self.nnv5_l2.array_used
+            emit_pos2 = self.nnv5_l2.emit[0, :C2]
+            l2_emit_rows_flat = np.zeros((N * n_chunks2, self.nnv5_l2.emit_words), dtype=np.uint64)
+            if C2 > 0 and choices2.shape[1] > 0:
+                m2       = choices2[:, :C2].astype(np.float32)
+                ebits2   = np.unpackbits(emit_pos2.view(np.uint8), axis=1, bitorder='little').astype(np.float32)
+                rbits2   = (m2 @ ebits2) > 0
+                l2_emit_rows_flat = np.packbits(rbits2.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l2.emit_words]
+
+            l2_emit_per_pos = np.zeros((N, self.nnv5_l2.emit_words), dtype=np.uint64)
+            l2_emit_rows = l2_emit_rows_flat.reshape(N, n_chunks2, self.nnv5_l2.emit_words)
+            for i in range(n_chunks2):
+                l2_emit_per_pos |= l2_emit_rows[:, i, :]
+
+            l2_emit_stacked  = np.stack([l2_emit_per_pos, np.zeros_like(l2_emit_per_pos)], axis=1)
+            synth_emit1_flat = self.nnv5_l2.reverse(l2_emit_stacked)
+
+            l1_emit_words = self.nnv5_l1.emit_words
+            synth_emit1_rechunked = synth_emit1_flat.reshape(N * n_chunks1, l1_emit_words) \
+                if synth_emit1_flat.shape[1] == n_chunks1 * l1_emit_words \
+                else np.zeros((N * n_chunks1, l1_emit_words), dtype=np.uint64)
+
+            l1_emit_stacked = np.stack([synth_emit1_rechunked, np.zeros_like(synth_emit1_rechunked)], axis=1)
+            synth_chunked1  = self.nnv5_l1.reverse(l1_emit_stacked)
+            synth_packed    = synth_chunked1.reshape(N, n_chunks1 * chunk_words1)
+
         else:
-            _, _, _, choices2, _ = self.nnv5_l2.forward(emit1_chunked)
+            # Layer 1 only — synthesize directly from L1 vocab noise
+            synth_packed = self.nnv5_l1.synthesize_from(
+                packed.reshape(N * n_chunks1, chunk_words1), self.rng
+            ).reshape(N, n_chunks1 * chunk_words1)
 
-        # Extract per-row L2 emit from choices
-        C2        = self.nnv5_l2.array_used
-        emit_pos2 = self.nnv5_l2.emit[0, :C2]
-        l2_emit_rows_flat = np.zeros((N * n_chunks2, self.nnv5_l2.emit_words), dtype=np.uint64)
-        if C2 > 0 and choices2.shape[1] > 0:
-            m2       = choices2[:, :C2].astype(np.float32)
-            ebits2   = np.unpackbits(emit_pos2.view(np.uint8), axis=1, bitorder='little').astype(np.float32)
-            rbits2   = (m2 @ ebits2) > 0
-            l2_emit_rows_flat = np.packbits(rbits2.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l2.emit_words]
-
-        # Aggregate L2 emit to per-position — OR over chunks
-        l2_emit_per_pos = np.zeros((N, self.nnv5_l2.emit_words), dtype=np.uint64)
-        l2_emit_rows = l2_emit_rows_flat.reshape(N, n_chunks2, self.nnv5_l2.emit_words)
-        for i in range(n_chunks2):
-            l2_emit_per_pos |= l2_emit_rows[:, i, :]
-
-        # Step 2: L2 reverse → synthetic L1 emit (per position)
-        # Stack with neg plane (all zeros — no exclusions for synthesis)
-        l2_emit_stacked = np.stack(
-            [l2_emit_per_pos, np.zeros_like(l2_emit_per_pos)], axis=1
-        )  # (N, 2, emit_words)
-        synth_emit1_flat = self.nnv5_l2.reverse(l2_emit_stacked)  # (N, l2_match_words)
-
-        # Apply NNv2 float affinity weighting on L2 reverse output if available
-        if self.nnv2_l2.array_used > 0:
-            _, _, _, choices_nnv2 = self.nnv2_l2.forward(synth_emit1_flat)
-            synth_emit1_flat = self.nnv2_l2.reverse(
-                np.stack([
-                    np.array([
-                        np.bitwise_or.reduce(
-                            self.nnv2_l2.emit[0, choices_nnv2[i]], axis=0
-                        ) if choices_nnv2[i].any() else np.zeros(self.nnv2_l2.emit_words, dtype=np.uint64)
-                        for i in range(N)
-                    ], dtype=np.uint64),
-                    np.zeros((N, self.nnv2_l2.emit_words), dtype=np.uint64)
-                ], axis=1)
-            ) if hasattr(self.nnv2_l2, 'reverse') else synth_emit1_flat
-
-        # Step 3: L1 reverse → synthetic packed bool
-        # Use synth_emit1_flat as the emit for L1 reverse
-        # Re-chunk to L1 emit shape
-        l1_emit_words = self.nnv5_l1.emit_words
-        synth_emit1_rechunked = synth_emit1_flat.reshape(N * n_chunks1, l1_emit_words) \
-            if synth_emit1_flat.shape[1] == n_chunks1 * l1_emit_words \
-            else np.zeros((N * n_chunks1, l1_emit_words), dtype=np.uint64)
-
-        l1_emit_stacked = np.stack(
-            [synth_emit1_rechunked, np.zeros_like(synth_emit1_rechunked)], axis=1
-        )
-        synth_chunked1 = self.nnv5_l1.reverse(l1_emit_stacked)   # (N*n_chunks1, chunk_words1)
-        synth_packed   = synth_chunked1.reshape(N, n_chunks1 * chunk_words1)
         # Unpack uint64 → bits → float
         synth_bits = np.unpackbits(
             synth_packed.view(np.uint8), axis=1, bitorder='little'
-        )[:, :self.d_model].astype(np.float32)               # (N, d_model)
+        )[:, :self.d_model].astype(np.float32)
 
         # Rescale to match real hidden state distribution
         synth_hidden = torch.from_numpy(synth_bits).to(self.device)
@@ -1198,11 +1180,13 @@ class SyntheticBatchHarness:
         return synth_loss
 
     def stats(self) -> dict:
-        return {
-            "l1_cases":       self.nnv5_l1.array_used,
-            "l1_groups":      self.nnv5_l1.emit_used,
-            "l2_cases":       self.nnv5_l2.array_used,
-            "l2_groups":      self.nnv5_l2.emit_used,
-            "nnv2_l1_cases":  self.nnv2_l1.array_used,
-            "nnv2_l2_cases":  self.nnv2_l2.array_used,
+        s = {
+            "l1_cases":      self.nnv5_l1.array_used,
+            "l1_groups":     self.nnv5_l1.emit_used,
+            "nnv2_l1_cases": self.nnv2_l1.array_used,
         }
+        if self.layer2_enabled and self.nnv5_l2 is not None:
+            s["l2_cases"]      = self.nnv5_l2.array_used
+            s["l2_groups"]     = self.nnv5_l2.emit_used
+            s["nnv2_l2_cases"] = self.nnv2_l2.array_used
+        return s
