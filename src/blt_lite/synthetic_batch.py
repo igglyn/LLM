@@ -96,7 +96,7 @@ class NNv5Block:
 
         merged_diff  = np.zeros((n_g, 2, mw), dtype=np.uint64)
         merged_emit  = np.zeros((n_g, 2, ew), dtype=np.uint64)
-        merged_match = np.zeros(n_g, dtype=bool)
+        merged_match = np.ones(n_g, dtype=bool)   # AND identity — False if any was unmatched
         merged_diff[:, 1]  = np.iinfo(np.uint64).max  # AND identity for neg plane
         merged_emit[:, 1]  = np.iinfo(np.uint64).max  # AND identity for neg emit
 
@@ -106,7 +106,7 @@ class NNv5Block:
             merged_diff[g, 1] &= diff2[i, 1]
             merged_emit[g, 0] |= emit2[i, 0]
             merged_emit[g, 1] &= emit2[i, 1]
-            merged_match[g]   |= match2[i]
+            merged_match[g]   &= match2[i]
 
         return merged_diff, merged_emit, merged_match
 
