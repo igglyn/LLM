@@ -856,15 +856,17 @@ class SyntheticBatchHarness:
         seed: int = 42,
         nnv5_update_steps: int = 100,
         synth_loss_weight: float = 0.5,
+        forward_batch_size: int = 4096,
     ):
-        self.model             = model
-        self.d_model           = d_model
-        self.n_synthetic       = n_synthetic
-        self.match_threshold   = match_threshold
-        self.device            = device
-        self.nnv5_update_steps = nnv5_update_steps
-        self.synth_loss_weight = synth_loss_weight
-        self.rng               = np.random.default_rng(seed)
+        self.model              = model
+        self.d_model            = d_model
+        self.n_synthetic        = n_synthetic
+        self.match_threshold    = match_threshold
+        self.device             = device
+        self.nnv5_update_steps  = nnv5_update_steps
+        self.synth_loss_weight  = synth_loss_weight
+        self.forward_batch_size = forward_batch_size
+        self.rng                = np.random.default_rng(seed)
 
         self.layer1_cfg = layer1
         self.layer2_cfg = layer2
@@ -950,11 +952,17 @@ class SyntheticBatchHarness:
         chunk_dim: int,
         nnv5_chunk_size: int,
         buf: np.ndarray,
+        forward_batch_size: int = 4096,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Run one NNv5+NNv2 layer on packed uint64 inputs with a persistent buffer.
 
-        packed_vecs:   (N, chunk_words) uint64  — chunked inputs (N = positions * n_chunks)
+        forward_batch_size controls how many rows forward processes at once.
+        nnv5_chunk_size controls how many diffs assign processes at once —
+        kept small to prevent case explosion.
+
+        The two are separated because forward can handle large batches efficiently
+        while assign needs small chunks to control case growth.
         """
         use_torch = self.device.type == "cuda"
         M         = packed_vecs.shape[0]
@@ -962,29 +970,40 @@ class SyntheticBatchHarness:
         # Append to buffer
         buf = np.concatenate([buf, packed_vecs], axis=0) if buf.shape[0] > 0 else packed_vecs.copy()
 
-        # Flush complete chunks from buffer
-        while buf.shape[0] >= nnv5_chunk_size:
-            cv           = buf[:nnv5_chunk_size]
-            buf          = buf[nnv5_chunk_size:]
-            cases_before = nnv5.array_used
+        # Process buffer in forward_batch_size chunks
+        while buf.shape[0] >= forward_batch_size:
+            fwd_batch    = buf[:forward_batch_size]
+            buf          = buf[forward_batch_size:]
             nnv2_active  = nnv5.emit_used > 0
 
+            # Forward on full batch — get all diffs at once
             if use_torch:
-                diff, emit, was_matched, choices, _ = nnv5.forward_torch(cv, self.device)
+                diff, emit, was_matched, _, _ = nnv5.forward_torch(fwd_batch, self.device)
             else:
-                diff, emit, was_matched, choices, _ = nnv5.forward(cv)
+                diff, emit, was_matched, _, _ = nnv5.forward(fwd_batch)
 
-            if nnv2_active:
-                neg_case, new_cases, new_cases_emit, new_group_cases = \
-                    nnv5.assign_candidates(diff, emit, was_matched)
-                nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
-            else:
-                nnv5.assign(diff, emit, was_matched)
+            # Assign diffs in nnv5_chunk_size slices to control case growth
+            n_diffs = diff.shape[0]
+            for start in range(0, max(1, n_diffs), nnv5_chunk_size):
+                end         = min(n_diffs, start + nnv5_chunk_size)
+                d_chunk     = diff[start:end]
+                e_chunk     = emit[start:end]
+                m_chunk     = was_matched[start:end]
+                cases_before = nnv5.array_used
 
-            cases_after = nnv5.array_used
-            if nnv5.emit_used > 0 and cases_after > cases_before:
-                nnv2.compress_range(nnv5, cases_before, cases_after)
-                nnv2.sync_to_nnv5(nnv5)
+                if nnv2_active:
+                    neg_case, new_cases, new_cases_emit, new_group_cases = \
+                        nnv5.assign_candidates(d_chunk, e_chunk, m_chunk)
+                    nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
+                else:
+                    nnv5.assign(d_chunk, e_chunk, m_chunk)
+                    if nnv5.emit_used > 0:
+                        nnv2_active = True
+
+                cases_after = nnv5.array_used
+                if nnv5.emit_used > 0 and cases_after > cases_before:
+                    nnv2.compress_range(nnv5, cases_before, cases_after)
+                    nnv2.sync_to_nnv5(nnv5)
 
         # Emit extraction pass on current inputs only
         if use_torch:
@@ -996,19 +1015,14 @@ class SyntheticBatchHarness:
         emit_pos = nnv5.emit[0, :C]
         per_row_emit = np.zeros((M, nnv5.emit_words), dtype=np.uint64)
         if C > 0 and choices_full.shape[1] > 0:
-            matched = choices_full[:, :C].astype(np.float32)        # (M, C)
-            # Unpack emit_pos bits: (C, EW) uint64 → (C, EW*64) float32
+            matched = choices_full[:, :C].astype(np.float32)
             emit_bits = np.unpackbits(
                 emit_pos.view(np.uint8), axis=1, bitorder='little'
-            ).astype(np.float32)                                     # (C, EW*64)
-            # Matmul: (M, C) @ (C, EW*64) → (M, EW*64)
-            # Any matched case contributing a 1 bit → sum > 0
-            result_bits = (matched @ emit_bits) > 0                  # (M, EW*64) bool
-            # Repack to uint64
+            ).astype(np.float32)
+            result_bits  = (matched @ emit_bits) > 0
             per_row_emit = np.packbits(
                 result_bits.astype(np.uint8), axis=1, bitorder='little'
             ).view(np.uint64)[:, :nnv5.emit_words]
-
 
         return per_row_emit, buf
 
@@ -1036,6 +1050,7 @@ class SyntheticBatchHarness:
             self.layer1_cfg.chunk_dim,
             self.layer1_cfg.nnv5_chunk_size,
             self._buf_l1,
+            self.forward_batch_size,
         )
         # emit1_rows: (N * n_chunks1, emit_words_l1)
         # Reshape to (N, n_chunks1 * emit_words_l1) then to (N * n_chunks2, chunk_words2)
@@ -1058,6 +1073,7 @@ class SyntheticBatchHarness:
             self.layer2_cfg.chunk_dim,
             self.layer2_cfg.nnv5_chunk_size,
             self._buf_l2,
+            self.forward_batch_size,
         )
 
     def synthetic_pass(

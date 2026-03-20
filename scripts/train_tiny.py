@@ -369,6 +369,7 @@ def main():
             seed=int(tcfg.get("seed", 42)),
             nnv5_update_steps=int(synth_cfg.get("nnv5_update_steps", 100)),
             synth_loss_weight=float(synth_cfg.get("synth_loss_weight", 0.5)),
+            forward_batch_size=int(synth_cfg.get("forward_batch_size", 4096)),
         )
         synth_harness.attach()
         synth_loss_weight = float(synth_cfg.get("synth_loss_weight", 0.5))
