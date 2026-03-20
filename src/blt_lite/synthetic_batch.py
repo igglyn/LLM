@@ -64,7 +64,50 @@ class NNv5Block:
         # emit: (2, case_capacity, emit_words) uint64
         self.emit = np.zeros((2, case_capacity, self.emit_words), dtype=np.uint64)
 
-    def _set_emit_group_bit(self, case_idx, group_idx: int, *, is_member: bool):
+    @staticmethod
+    def _merge_diffs(diff: np.ndarray, emit: np.ndarray,
+                     was_matched: np.ndarray) -> tuple:
+        """
+        Merge diffs sharing the same positive plane.
+        AND their negative planes, OR their emits — same result as sequential assign.
+        Reduces case explosion when large forward batches produce similar diffs.
+        """
+        if diff.shape[0] == 0:
+            return diff, emit, was_matched
+
+        # Full dedup first
+        diff2, idxs = np.unique(diff, axis=0, return_index=True)
+        emit2       = emit[idxs]
+        match2      = was_matched[idxs]
+
+        if diff2.shape[0] <= 1:
+            return diff2, emit2, match2
+
+        # Merge by positive plane
+        pos_planes = diff2[:, 0]
+        _, inv, counts = np.unique(pos_planes, axis=0,
+                                   return_inverse=True, return_counts=True)
+        if counts.max() == 1:
+            return diff2, emit2, match2
+
+        n_g = counts.shape[0]
+        mw  = diff2.shape[2]
+        ew  = emit2.shape[2]
+
+        merged_diff  = np.zeros((n_g, 2, mw), dtype=np.uint64)
+        merged_emit  = np.zeros((n_g, 2, ew), dtype=np.uint64)
+        merged_match = np.zeros(n_g, dtype=bool)
+        merged_diff[:, 1] = np.iinfo(np.uint64).max  # AND identity
+
+        for i in range(diff2.shape[0]):
+            g = inv[i]
+            merged_diff[g, 0]  = diff2[i, 0]
+            merged_diff[g, 1] &= diff2[i, 1]
+            merged_emit[g, 0] |= emit2[i, 0]
+            merged_emit[g, 1] &= emit2[i, 1]
+            merged_match[g]   |= match2[i]
+
+        return merged_diff, merged_emit, merged_match
         assert 0 <= group_idx < self.group_capacity
         word, bit = divmod(group_idx, 64)
         flag = np.uint64(1) << np.uint64(bit)
@@ -129,12 +172,8 @@ class NNv5Block:
         emit_cul = emit_out[non_zero]
         was_matched_cul = was_matched[non_zero]
 
-        if diff_cul.shape[0] > 0:
-            diff_cul2, idxs = np.unique(diff_cul, axis=0, return_index=True)
-            emit_cul2        = emit_cul[idxs]
-            was_matched_cul2 = was_matched_cul[idxs]
-        else:
-            diff_cul2, emit_cul2, was_matched_cul2 = diff_cul, emit_cul, was_matched_cul
+        diff_cul2, emit_cul2, was_matched_cul2 = NNv5Block._merge_diffs(
+            diff_cul, emit_cul, was_matched_cul)
 
         counts = np.count_nonzero(choices, axis=0).astype(np.uint64)
 
@@ -718,12 +757,8 @@ class NNv2Block:
         emit_cul = emit_out[non_zero]
         was_matched_cul = was_matched[non_zero]
 
-        if diff_cul.shape[0] > 0:
-            diff_cul2, idxs = np.unique(diff_cul, axis=0, return_index=True)
-            emit_cul2 = emit_cul[idxs]
-            was_matched_cul2 = was_matched_cul[idxs]
-        else:
-            diff_cul2, emit_cul2, was_matched_cul2 = diff_cul, emit_cul, was_matched_cul
+        diff_cul2, emit_cul2, was_matched_cul2 = NNv5Block._merge_diffs(
+            diff_cul, emit_cul, was_matched_cul)
 
         return diff_cul2, emit_cul2, was_matched_cul2, choices
 
