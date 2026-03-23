@@ -32,6 +32,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+class NNv5CapacityError(RuntimeError):
+    """Raised when NNv5Block or NNv2Block exceeds allocated capacity."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # NNv5 wrapper
 # ---------------------------------------------------------------------------
@@ -111,28 +116,54 @@ class NNv5Block:
         return merged_diff, merged_emit, merged_match
 
     def _set_emit_group_bit(self, case_idx, group_idx: int, *, is_member: bool):
-        assert 0 <= group_idx < self.group_capacity
+        if not (0 <= group_idx < self.group_capacity):
+            raise NNv5CapacityError(
+                f"NNv5Block emit group index out of bounds: "
+                f"group_idx={group_idx}, group_capacity={self.group_capacity}"
+            )
         word, bit = divmod(group_idx, 64)
         flag = np.uint64(1) << np.uint64(bit)
         plane = 0 if is_member else 1
         self.emit[plane, case_idx, word] |= flag
 
+    @staticmethod
+    def pack_choices(choices: np.ndarray) -> np.ndarray:
+        """Pack (N, C) bool → (N, ceil(C/64)) uint64."""
+        N, C = choices.shape
+        if C == 0:
+            return np.zeros((N, 0), dtype=np.uint64)
+        words = (C + 63) // 64
+        pad   = words * 64 - C
+        if pad:
+            choices = np.pad(choices, ((0, 0), (0, pad)))
+        return np.packbits(choices, axis=1, bitorder='little').view(np.uint64)
+
+    @staticmethod
+    def unpack_choices(packed: np.ndarray, C: int) -> np.ndarray:
+        """Unpack (N, ceil(C/64)) uint64 → (N, C) bool."""
+        if C == 0:
+            return np.zeros((packed.shape[0], 0), dtype=bool)
+        return np.unpackbits(
+            packed.view(np.uint8), axis=1, bitorder='little'
+        )[:, :C].astype(bool)
+
     def forward(self, tokens: np.ndarray):
         """
         tokens: (N, match_words) uint64 — packed bit representation
-        returns: (diff, emit, was_matched, choices, activation_counts)
+        returns: (diff, emit, was_matched, choices_packed, activation_counts)
+                 choices_packed: (N, ceil(C/64)) uint64
         """
         if self.array_used == 0:
             n = tokens.shape[0]
             tokens_inv = ~tokens.copy()
-            inp = np.stack((tokens, tokens_inv), axis=1)       # (N, 2, match_words)
+            inp = np.stack((tokens, tokens_inv), axis=1)
             inp2, idxs = np.unique(inp, axis=0, return_index=True)
             diff        = inp2
             emit        = np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64)
             was_matched = np.zeros(inp2.shape[0], dtype=bool)
-            choices     = np.zeros((n, 0), dtype=bool)
+            choices     = np.zeros((n, 0), dtype=np.uint64)
             counts      = np.zeros(0, dtype=np.uint64)
-            return diff, emit, was_matched, choices, counts
+            emit_out = np.zeros((n, 2, self.emit_words), dtype=np.uint64); return diff, emit, was_matched, choices, counts, emit_out
 
         tokens_inv = ~tokens.copy()                                 # (N, match_words)
         inp = np.stack((tokens, tokens_inv), axis=1)                # (N, 2, match_words)
@@ -141,7 +172,7 @@ class NNv5Block:
         inp_exp    = inp[..., None]                                  # (N, 2, W, 1)
 
         selection = inp_exp & match_view                            # (N, 2, W, C)
-        choices   = (selection == match_view).all((1, 2))           # (N, C)
+        choices   = (selection == match_view).all((1, 2))           # (N, C) bool
 
         was_matched = choices.any(axis=1)                           # (N,)
 
@@ -178,9 +209,15 @@ class NNv5Block:
         diff_cul2, emit_cul2, was_matched_cul2 = NNv5Block._merge_diffs(
             diff_cul, emit_cul, was_matched_cul)
 
-        counts = np.count_nonzero(choices, axis=0).astype(np.uint64)
+        counts         = np.count_nonzero(choices, axis=0).astype(np.uint64)
+        choices_packed = NNv5Block.pack_choices(choices)
 
-        return diff_cul2, emit_cul2, was_matched_cul2, choices, counts
+        # Return values:
+        # diff_cul2, emit_cul2, was_matched_cul2 — aligned with diffs, for assign
+        # choices_packed — (N, ceil(C/64)) uint64, aligned with original N inputs
+        # counts — (C,) activation counts
+        # emit_out — (N, 2, EW) uint64, per-input emit aligned with choices_packed
+        return diff_cul2, emit_cul2, was_matched_cul2, choices_packed, counts, emit_out
 
     def forward_torch(
         self,
@@ -203,7 +240,7 @@ class NNv5Block:
             diff        = inp2
             emit        = np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64)
             was_matched = np.zeros(inp2.shape[0], dtype=bool)
-            choices     = np.zeros((n, 0), dtype=bool)
+            choices     = np.zeros((n, 0), dtype=np.uint64)
             counts      = np.zeros(0, dtype=np.uint64)
             return diff, emit, was_matched, choices, counts
 
@@ -302,9 +339,10 @@ class NNv5Block:
         else:
             diff_cul2, emit_cul2, was_matched_cul2 = diff_cul, emit_cul, was_matched_cul
 
-        counts = np.count_nonzero(choices_np, axis=0).astype(np.uint64)
+        counts         = np.count_nonzero(choices_np, axis=0).astype(np.uint64)
+        choices_packed = NNv5Block.pack_choices(choices_np)
 
-        return diff_cul2, emit_cul2, was_matched_cul2, choices_np, counts
+        return diff_cul2, emit_cul2, was_matched_cul2, choices_packed, counts, emit_out_np
 
     def assign_candidates(self, diff: np.ndarray, emit: np.ndarray, was_matched: np.ndarray) -> tuple:
         """
@@ -340,7 +378,12 @@ class NNv5Block:
         """Directly commit candidates to the table — NNv5 path."""
         if new_cases.shape[0] > 0:
             n = new_cases.shape[0]
-            assert self.array_used + n <= self.case_capacity, "Case capacity exceeded"
+            if self.array_used + n > self.case_capacity:
+                raise NNv5CapacityError(
+                    f"NNv5Block case capacity exceeded: "
+                    f"used={self.array_used} + new={n} > capacity={self.case_capacity} "
+                    f"(bool_dim={self.bool_dim}, group_capacity={self.group_capacity})"
+                )
             sl = slice(self.array_used, self.array_used + n)
             self.match[:, :, sl] = np.permute_dims(new_cases, (1, 2, 0))
             self.match[1, :, sl] &= neg_case[..., None]
@@ -350,8 +393,18 @@ class NNv5Block:
             self.array_used += n
 
         if new_group_cases.shape[0] > 0:
-            assert self.array_used + 1 <= self.case_capacity, "Case capacity exceeded"
-            assert self.emit_used < self.group_capacity, "Group capacity exceeded"
+            if self.array_used + 1 > self.case_capacity:
+                raise NNv5CapacityError(
+                    f"NNv5Block case capacity exceeded on group creation: "
+                    f"used={self.array_used} >= capacity={self.case_capacity} "
+                    f"(bool_dim={self.bool_dim}, group_capacity={self.group_capacity})"
+                )
+            if self.emit_used >= self.group_capacity:
+                raise NNv5CapacityError(
+                    f"NNv5Block group capacity exceeded: "
+                    f"emit_used={self.emit_used} >= group_capacity={self.group_capacity} "
+                    f"(bool_dim={self.bool_dim}, case_capacity={self.case_capacity})"
+                )
 
             gidx = self.emit_used
             self.emit_used += 1
@@ -384,23 +437,24 @@ class NNv5Block:
         """
         return choices.sum(axis=1).astype(np.float32)
 
-    def group_affinities(self, choices: np.ndarray) -> np.ndarray:
+    def group_affinities(self, choices_packed: np.ndarray) -> np.ndarray:
         """
         Unpack group membership bits into per-input group affinity scores.
-        choices: (N, C) bool
+        choices_packed: (N, ceil(C/64)) uint64
         returns: (N, emit_used) float
         """
-        if self.emit_used == 0 or self.array_used == 0:
-            return np.zeros((choices.shape[0], 0), dtype=np.float32)
+        C = self.array_used
+        if self.emit_used == 0 or C == 0:
+            return np.zeros((choices_packed.shape[0], 0), dtype=np.float32)
 
-        emit_pos = self.emit[0, :self.array_used]               # (C, W)
+        choices  = NNv5Block.unpack_choices(choices_packed, C)  # (N, C) bool
+        emit_pos = self.emit[0, :C]                              # (C, W)
         affinities = np.zeros((choices.shape[0], self.emit_used), dtype=np.float32)
 
         for g in range(self.emit_used):
             word, bit = divmod(g, 64)
             flag = np.uint64(1) << np.uint64(bit)
-            member_cases = ((emit_pos[:, word] & flag) != 0)    # (C,) bool
-            # affinity = fraction of member cases that fired per input
+            member_cases = ((emit_pos[:, word] & flag) != 0)
             n_member = member_cases.sum()
             if n_member > 0:
                 affinities[:, g] = choices[:, member_cases].sum(axis=1) / n_member
@@ -687,14 +741,19 @@ class NNv2Block:
                     self.match[1, :, ei] &= src_mn
                     self.float_emit[ei] = a_aff
 
-                    if self.array_used < self.case_capacity:
-                        bi = self.array_used
-                        self.match[0, :, bi] = self.match[0, :, ei]
-                        self.match[1, :, bi] = self.match[1, :, ei]
-                        self.emit[0, bi] = sub_b_pos
-                        self.emit[1, bi] = sub_b_neg
-                        self.float_emit[bi] = b_aff
-                        self.array_used += 1
+                    if self.array_used >= self.case_capacity:
+                        raise NNv5CapacityError(
+                            f"NNv2Block case capacity exceeded on split: "
+                            f"used={self.array_used} >= capacity={self.case_capacity} "
+                            f"(bool_dim={self.bool_dim}, group_capacity={self.group_capacity})"
+                        )
+                    bi = self.array_used
+                    self.match[0, :, bi] = self.match[0, :, ei]
+                    self.match[1, :, bi] = self.match[1, :, ei]
+                    self.emit[0, bi] = sub_b_pos
+                    self.emit[1, bi] = sub_b_neg
+                    self.float_emit[bi] = b_aff
+                    self.array_used += 1
 
                     split_done = True
                     break
@@ -703,14 +762,19 @@ class NNv2Block:
                 continue
 
             # APPEND
-            if self.array_used < self.case_capacity:
-                idx = self.array_used
-                self.match[0, :, idx] = src_mp
-                self.match[1, :, idx] = src_mn
-                self.emit[0, idx] = src_ep
-                self.emit[1, idx] = src_en
-                self._init_float_emit(idx, src_ep)
-                self.array_used += 1
+            if self.array_used >= self.case_capacity:
+                raise NNv5CapacityError(
+                    f"NNv2Block case capacity exceeded on append: "
+                    f"used={self.array_used} >= capacity={self.case_capacity} "
+                    f"(bool_dim={self.bool_dim}, group_capacity={self.group_capacity})"
+                )
+            idx = self.array_used
+            self.match[0, :, idx] = src_mp
+            self.match[1, :, idx] = src_mn
+            self.emit[0, idx] = src_ep
+            self.emit[1, idx] = src_en
+            self._init_float_emit(idx, src_ep)
+            self.array_used += 1
 
     def forward(self, tokens: np.ndarray):
         """
@@ -718,7 +782,8 @@ class NNv2Block:
         Used when NNv2 takes over from NNv5 as primary case handler.
 
         tokens: (N, match_words) uint64
-        returns: (diff, emit, was_matched, choices)
+        returns: (diff, emit, was_matched, choices_packed)
+                 choices_packed: (N, ceil(C/64)) uint64
         """
         if self.array_used == 0:
             n = tokens.shape[0]
@@ -728,13 +793,13 @@ class NNv2Block:
             return (inp2,
                     np.zeros((inp2.shape[0], 2, self.emit_words), dtype=np.uint64),
                     np.zeros(inp2.shape[0], dtype=bool),
-                    np.zeros((n, 0), dtype=bool))
+                    np.zeros((n, 0), dtype=np.uint64))
 
         tokens_inv = ~tokens.copy()
         inp = np.stack((tokens, tokens_inv), axis=1)         # (N, 2, W)
         match_view = self.match[None, ..., :self.array_used] # (1, 2, W, C)
         selection  = inp[..., None] & match_view
-        choices    = (selection == match_view).all((1, 2))   # (N, C)
+        choices    = (selection == match_view).all((1, 2))   # (N, C) bool
         was_matched = choices.any(axis=1)
 
         emit_view  = self.emit[None, :, :self.array_used]
@@ -763,7 +828,8 @@ class NNv2Block:
         diff_cul2, emit_cul2, was_matched_cul2 = NNv5Block._merge_diffs(
             diff_cul, emit_cul, was_matched_cul)
 
-        return diff_cul2, emit_cul2, was_matched_cul2, choices
+        choices_packed = NNv5Block.pack_choices(choices)
+        return diff_cul2, emit_cul2, was_matched_cul2, choices_packed
 
     def stats(self) -> dict:
         return {
@@ -798,11 +864,13 @@ class NNv2Block:
         N        = packed_vecs.shape[0]
         results  = packed_vecs.copy()
         emit_pos = self.emit[0, :self.array_used]
+        C        = self.array_used
 
-        _, _, _, choices = self.forward(packed_vecs)
+        _, _, _, choices_packed, _, _ = self.forward(packed_vecs)
+        choices = NNv5Block.unpack_choices(choices_packed, C)   # (N, C) bool
 
         for i in range(N):
-            if choices.shape[1] == 0 or not choices[i].any():
+            if C == 0 or not choices[i].any():
                 continue
 
             matched_emit = emit_pos[choices[i]]
@@ -1016,9 +1084,9 @@ class SyntheticBatchHarness:
 
             # Forward on full batch — get all diffs at once
             if use_torch:
-                diff, emit, was_matched, _, _ = nnv5.forward_torch(fwd_batch, self.device)
+                diff, emit, was_matched, _, _, _ = nnv5.forward_torch(fwd_batch, self.device)
             else:
-                diff, emit, was_matched, _, _ = nnv5.forward(fwd_batch)
+                diff, emit, was_matched, _, _, _ = nnv5.forward(fwd_batch)
 
             # Assign diffs in nnv5_chunk_size slices to control case growth
             n_diffs = diff.shape[0]
@@ -1045,22 +1113,17 @@ class SyntheticBatchHarness:
 
         # Emit extraction pass on current inputs only
         if use_torch:
-            _, _, _, choices_full, _ = nnv5.forward_torch(packed_vecs, self.device)
+            _, _, _, choices_full, _, _ = nnv5.forward_torch(packed_vecs, self.device)
         else:
-            _, _, _, choices_full, _ = nnv5.forward(packed_vecs)
+            _, _, _, choices_full, _, _ = nnv5.forward(packed_vecs)
 
         C        = nnv5.array_used
         emit_pos = nnv5.emit[0, :C]
         per_row_emit = np.zeros((M, nnv5.emit_words), dtype=np.uint64)
         if C > 0 and choices_full.shape[1] > 0:
-            matched = choices_full[:, :C].astype(np.float32)
-            emit_bits = np.unpackbits(
-                emit_pos.view(np.uint8), axis=1, bitorder='little'
-            ).astype(np.float32)
-            result_bits  = (matched @ emit_bits) > 0
-            per_row_emit = np.packbits(
-                result_bits.astype(np.uint8), axis=1, bitorder='little'
-            ).view(np.uint64)[:, :nnv5.emit_words]
+            matched = NNv5Block.unpack_choices(choices_full, C)    # (M, C) bool
+            masked  = np.where(matched[:, :, None], emit_pos[None, :, :], np.uint64(0))
+            per_row_emit = np.bitwise_or.reduce(masked, axis=1)    # (M, EW)
 
         return per_row_emit, buf
 
@@ -1154,15 +1217,15 @@ class SyntheticBatchHarness:
 
         use_torch = self.device.type == "cuda"
         if use_torch:
-            _, _, _, choices1, _ = self.nnv5_l1.forward_torch(chunked1, self.device)
+            _, _, _, choices1, _, _ = self.nnv5_l1.forward_torch(chunked1, self.device)
         else:
-            _, _, _, choices1, _ = self.nnv5_l1.forward(chunked1)
+            _, _, _, choices1, _, _ = self.nnv5_l1.forward(chunked1)
 
         C1        = self.nnv5_l1.array_used
         emit_pos1 = self.nnv5_l1.emit[0, :C1]
         emit1_rows = np.zeros((N * n_chunks1, self.nnv5_l1.emit_words), dtype=np.uint64)
         if C1 > 0 and choices1.shape[1] > 0:
-            m = choices1[:, :C1]
+            m       = NNv5Block.unpack_choices(choices1, C1)
             masked1 = np.where(m[:, :, None], emit_pos1[None, :, :], np.uint64(0))
             emit1_rows = np.bitwise_or.reduce(masked1, axis=1)
 
@@ -1177,18 +1240,17 @@ class SyntheticBatchHarness:
 
             emit1_chunked = emit1_flat.reshape(N * n_chunks2, chunk_words2)
             if use_torch:
-                _, _, _, choices2, _ = self.nnv5_l2.forward_torch(emit1_chunked, self.device)
+                _, _, _, choices2, _, _ = self.nnv5_l2.forward_torch(emit1_chunked, self.device)
             else:
-                _, _, _, choices2, _ = self.nnv5_l2.forward(emit1_chunked)
+                _, _, _, choices2, _, _ = self.nnv5_l2.forward(emit1_chunked)
 
             C2        = self.nnv5_l2.array_used
             emit_pos2 = self.nnv5_l2.emit[0, :C2]
             l2_emit_rows_flat = np.zeros((N * n_chunks2, self.nnv5_l2.emit_words), dtype=np.uint64)
             if C2 > 0 and choices2.shape[1] > 0:
-                m2       = choices2[:, :C2].astype(np.float32)
-                ebits2   = np.unpackbits(emit_pos2.view(np.uint8), axis=1, bitorder='little').astype(np.float32)
-                rbits2   = (m2 @ ebits2) > 0
-                l2_emit_rows_flat = np.packbits(rbits2.astype(np.uint8), axis=1, bitorder='little').view(np.uint64)[:, :self.nnv5_l2.emit_words]
+                m2      = NNv5Block.unpack_choices(choices2, C2)
+                masked2 = np.where(m2[:, :, None], emit_pos2[None, :, :], np.uint64(0))
+                l2_emit_rows_flat = np.bitwise_or.reduce(masked2, axis=1)
 
             l2_emit_per_pos = np.zeros((N, self.nnv5_l2.emit_words), dtype=np.uint64)
             l2_emit_rows = l2_emit_rows_flat.reshape(N, n_chunks2, self.nnv5_l2.emit_words)

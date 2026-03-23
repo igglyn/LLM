@@ -8,6 +8,8 @@ pkgs.mkShell {
      python313
      python313Packages.pytest
      python313Packages.torch
+     python313Packages.numpy
+     python313Packages.numba
      python313Packages.transformers
      python313Packages.datasets
    ];

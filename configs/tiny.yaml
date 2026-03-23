@@ -10,18 +10,40 @@ data:
   processed_dir_patcher2: data/processed/patcher2
   processed_dir_tiny: data/processed/tiny
   train_split: 0.95
+  cache_dtype: float32
 
 model:
-  seq_len: 256
+  seq_len: 16
   d_model: 384
-  pos_encoding: learned
+  pos_encoding: rope
   n_layers: 6
   n_heads: 6
   dropout: 0.1
   grad_checkpointing: false
   flash_attention: true
+  block_attention: true
+  block_size: 2
+  model_dtype: float32
 
 patcher:
+  seq_len_tokens: 256
+  patch_size: 16
+  latent_dim: 384
+  pos_encoding: rope
+  encoder_layers: 1
+  decoder_layers: 1
+  n_heads: 6
+  dropout: 0.025
+  grad_checkpointing: false
+  flash_attention: true
+  block_attention: false
+  block_size: 2
+  pretrained_path: "outputs/patcher/last.pt"
+
+
+patcher2:
+  enabled: false
+  seq_len_tokens: 256
   patch_size: 8
   latent_dim: 384
   pos_encoding: learned
@@ -29,79 +51,69 @@ patcher:
   decoder_layers: 2
   n_heads: 6
   dropout: 0.1
-  grad_checkpointing: false
+  grad_checkpointing: true
   flash_attention: true
   block_attention: false
   block_size: 8
-  pretrained_path: ""
-
-
-patcher2:
-  enabled: false
-  patch_size: 2
-  latent_dim: 384
-  pos_encoding: learned
-  encoder_layers: 2
-  decoder_layers: 2
-  n_heads: 6
-  dropout: 0.1
-  grad_checkpointing: false
-  flash_attention: true
-  block_attention: false
-  block_size: 8
-  pretrained_path: ""
+  pretrained_path: "outputs/patcher2/last.pt"
 
 patcher2_train:
-  seq_len_tokens: 1024
-  batch_size: 8
-  max_steps: 3000
-  eval_every: 100
+  batch_size: 2
+  max_steps: 8000
+  eval_every: 500
   eval_batches: 50
-  save_every: 200
+  save_every: 1000
   lr: 0.0003
   weight_decay: 0.01
-  grad_clip: 1.0
-  lr_reduce_threshold: 0.05
-  lr_reduce_factor: 0.5
-  lr_reduce_threshold_2: 0.03
-  lr_reduce_factor_2: 0.5
-  lr_min: 0.000001
-  out_dir: outputs/patcher2
-  amp_enabled: true
-  amp_dtype: float16
-
-patcher_train:
-  seq_len_tokens: 1024
-  batch_size: 8
-  max_steps: 3000
-  eval_every: 100
-  eval_batches: 50
-  save_every: 200
-  lr: 0.0003
-  weight_decay: 0.01
-  grad_clip: 1.0
-  lr_reduce_threshold: 0.05
-  lr_reduce_factor: 0.5
-  lr_reduce_threshold_2: 0.03
-  lr_reduce_factor_2: 0.5
-  lr_min: 0.000001
-  out_dir: outputs/patcher
-  amp_enabled: false
-  amp_dtype: float16
-
-train:
-  seed: 42
-  batch_size: 8
-  grad_accum_steps: 4
-  max_steps: 20
-  eval_every: 110000
-  eval_batches: 50
-  save_every: 1
-  lr_max: 0.0003
-  lr_min: 0.00003
+  grad_clip: 0.1
   lr_reduce_threshold: 2.0
   lr_reduce_factor: 0.5
   lr_reduce_threshold_2: 1.5
+  lr_reduce_factor_2: 0.5
+  lr_min: 0.0
+  out_dir: outputs/patcher2
+  amp_enabled: false
+  amp_dtype: float16
+
+patcher_train:
+  batch_size: 1
+  max_steps: 10000
+  eval_every: 500
+  eval_batches: 50
+  save_every: 1000
+  lr: 0.0001
+  weight_decay: 0.01
+  grad_clip: 0.20
+  lr_reduce_threshold: 0.000008
+  lr_reduce_factor: 0.25
+  lr_reduce_threshold_2: 0.0000001
+  lr_reduce_factor_2: 0.5
+  lr_min: 0.0
+  out_dir: outputs/patcher
+  amp_enabled: true
+  amp_dtype: float16
+  optimizer: adamamix
+  slow_ema_window: 50
+  slow_ema_percentile: 20.0
+  slow_ema_oom_step: 2
+  beta3: 0.9999
+  alpha: 2.0
+  beta3_warmup: ~
+  alpha_warmup: ~
+
+train:
+  seed: 42
+  batch_size: 16
+  grad_accum_steps: 2
+  max_steps: 7000
+  eval_every: 1000
+  eval_batches: 50
+  save_every: 1000
+  lr_max: 0.0001
+  lr_min: 0.0001
+  lr_reduce_threshold: 0.0
+  lr_reduce_factor: 0.5
+  lr_reduce_threshold_2: 0.0
   lr_reduce_factor_2: 0.5
   warmup_steps: 1000
   weight_decay: 0.1
@@ -109,8 +121,36 @@ train:
   amp_enabled: true
   amp_dtype: float16
   out_dir: outputs
+  optimizer: ademamix
+  beta3: 0.9999
+  alpha: 2
+  beta3_warmup: ~
+  alpha_warmup: ~
 
 sample:
-  temperature: 0.9
-  top_k: 40
-  max_new_patches: 128
+  temperature: 0.7
+  top_k: 20
+  max_new_patches: 256
+
+synthetic_batch:
+  enabled: false
+  n_synthethic: 1
+  match_threshold: 0.1
+  synth_loss_weight: 0.5
+  nnv5_update_steps: 100
+  forward_batch_size: 1024
+
+  layer1:
+    chunk_dim: 32
+    case_capacity: 1024
+    group_capacity: 512
+    nnv5_chunk_size: 64
+    nnv2_case_capacity: 1024
+  
+  layer2:
+    chunk_dim: 12
+    case_capacity: 0
+    group_capacity: 512
+    nnv5_chunk_size: 64
+    nnv2_case_capacity: 0
+

@@ -157,6 +157,38 @@ class TransformerBlock(nn.Module):
         return x
 
 
+class MambaBlock(nn.Module):
+    """
+    Drop-in replacement for TransformerBlock using Mamba SSM.
+    Accepts the same forward signature — rope/block_attention args are ignored.
+    Requires mamba-ssm package.
+    """
+    def __init__(self, d_model: int, dropout: float, **kwargs):
+        super().__init__()
+        try:
+            from mamba_ssm import Mamba
+        except ImportError:
+            raise ImportError(
+                "mamba-ssm is required for architecture='mamba'. "
+                "Install with: pip install mamba-ssm"
+            )
+        self.mamba = Mamba(d_model=d_model)
+        self.ln    = nn.LayerNorm(d_model)
+        self.drop  = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cos: torch.Tensor | None = None,
+        rope_sin: torch.Tensor | None = None,
+        block_attention: bool = False,
+        block_size: int = 8,
+    ) -> torch.Tensor:
+        # Pre-norm residual — rope/block_attention not used by Mamba
+        x = x + self.drop(self.mamba(self.ln(x)))
+        return x
+
+
 class PatchEncoder(nn.Module):
     def __init__(
         self,
@@ -390,11 +422,15 @@ class TinyPatchLM(nn.Module):
         patcher2_block_size: int = 8,
         trunk_block_attention: bool = False,
         trunk_block_size: int = 8,
+        architecture: str = "transformer",
     ):
         super().__init__()
         if patch_size <= 0 or patcher2_patch_size <= 0:
             raise ValueError("patch sizes must be > 0")
-        self.seq_len = seq_len  # large-patch context length
+        if architecture not in {"transformer", "mamba"}:
+            raise ValueError("architecture must be one of: transformer, mamba")
+        self.seq_len = seq_len
+        self.architecture = architecture  # large-patch context length
         self.use_patcher2 = use_patcher2
         effective_patcher2_size = patcher2_patch_size if use_patcher2 else 1
         self.large_patch_size = patch_size * effective_patcher2_size
@@ -448,12 +484,15 @@ class TinyPatchLM(nn.Module):
             else None
         )
 
-        self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout, use_flash_attention=flash_attention)
-                for _ in range(n_layers)
-            ]
-        )
+        if architecture == "mamba":
+            self.blocks = nn.ModuleList(
+                [MambaBlock(d_model=d_model, dropout=dropout) for _ in range(n_layers)]
+            )
+        else:
+            self.blocks = nn.ModuleList(
+                [TransformerBlock(d_model=d_model, n_heads=n_heads, dropout=dropout, use_flash_attention=flash_attention)
+                 for _ in range(n_layers)]
+            )
         self.ln_f = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight
@@ -469,8 +508,12 @@ class TinyPatchLM(nn.Module):
 
     def load_patcher_checkpoint(self, path: str | Path, map_location: torch.device | str | None = None) -> None:
         ckpt = torch.load(Path(path), map_location=map_location)
-        state = ckpt["patcher"] if isinstance(ckpt, dict) and "patcher" in ckpt else ckpt
-        self.patcher.load_state_dict(state)
+        patcher_state = ckpt["patcher"] if isinstance(ckpt, dict) and "patcher" in ckpt else ckpt
+        self.patcher.load_state_dict(patcher_state)
+        if isinstance(ckpt, dict) and "token_emb" in ckpt:
+            self.token_emb.load_state_dict(ckpt["token_emb"])
+        else:
+            print("Warning: patcher checkpoint has no token_emb — token embedding left as initialized")
 
     def load_patcher2_checkpoint(self, path: str | Path, map_location: torch.device | str | None = None) -> None:
         if self.patcher2 is None:
@@ -491,9 +534,16 @@ class TinyPatchLM(nn.Module):
                 pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
                 h = h + self.token_pos_emb(pos)
 
-            h, _ = self.patcher(h)
+        # Patchers may be on CPU — move h to patcher device, run, move back
+        patcher_device = next(self.patcher.parameters()).device
+        with torch.no_grad():
+            h_p = h.to(patcher_device)
+            h_p, _ = self.patcher(h_p)
             if self.patcher2 is not None:
-                h, _ = self.patcher2(h)
+                p2_device = next(self.patcher2.parameters()).device
+                h_p = h_p.to(p2_device)
+                h_p, _ = self.patcher2(h_p)
+            h = h_p.to(x.device)
 
         return self.forward_from_hidden(h, targets)
 

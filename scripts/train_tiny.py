@@ -145,6 +145,7 @@ def _build_model_from_cfg(cfg: dict, tokenizer: FixedPatchTokenizer, device: tor
         patcher2_block_size=int(cfg.get("patcher2", {}).get("block_size", 8)),
         trunk_block_attention=bool(model_cfg.get("block_attention", False)),
         trunk_block_size=int(model_cfg.get("block_size", 8)),
+        architecture=str(model_cfg.get("architecture", "transformer")),
     ).to(device=device, dtype={"float32": torch.float32, "float64": torch.float64, "float16": torch.float16}.get(
         str(model_cfg.get("model_dtype", "float32")), torch.float32
     ))
@@ -263,43 +264,30 @@ def main():
 
     seq_len = _token_seq_len_from_cfg(cfg)
     patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
-    if patcher2_enabled:
-        cached_train = processed_dir / "train_stage2_hidden.npy"
-        cached_val   = processed_dir / "val_stage2_hidden.npy"
-    else:
-        cached_train = processed_dir / "train_stage1_hidden.npy"
-        cached_val   = processed_dir / "val_stage1_hidden.npy"
-    use_cached_hidden = cached_train.exists() and cached_val.exists()
-
-    if use_cached_hidden:
-        print("Using cached stage2 hidden states for tiny LM training")
-        train_loader = DataLoader(
-            HiddenCausalDataset(cached_train, processed_dir / "train_tokens.npy", seq_len),
-            batch_size=int(tcfg["batch_size"]),
-            shuffle=True,
-            drop_last=True,
-        )
-        val_loader = DataLoader(
-            HiddenCausalDataset(cached_val, processed_dir / "val_tokens.npy", seq_len),
-            batch_size=int(tcfg["batch_size"]),
-            shuffle=False,
-            drop_last=False,
-        )
-    else:
-        token_dir = processed_dir
-        if not (token_dir / "train_tokens.npy").exists():
-            token_dir = Path(cfg["data"]["processed_dir_patcher"])
-            print(f"train_tokens.npy not in tiny dir, loading from patcher dir")
-        train_loader, val_loader = build_dataloaders(
-            token_dir / "train_tokens.npy",
-            token_dir / "val_tokens.npy",
-            seq_len=seq_len,
-            batch_size=int(tcfg["batch_size"]),
-        )
+    # Online path — patchers run on CPU inline, no cache needed
+    use_cached_hidden = False
+    token_dir = processed_dir
+    if not (token_dir / "train_tokens.npy").exists():
+        token_dir = Path(cfg["data"]["processed_dir_patcher"])
+        print(f"train_tokens.npy not in tiny dir, loading from patcher dir")
+    train_loader, val_loader = build_dataloaders(
+        token_dir / "train_tokens.npy",
+        token_dir / "val_tokens.npy",
+        seq_len=seq_len,
+        batch_size=int(tcfg["batch_size"]),
+    )
+    print("Online patcher mode — patchers will run on CPU per batch")
 
     model = _build_model_from_cfg(cfg, tokenizer, device)
-    if not use_cached_hidden:
-        _maybe_load_pretrained_patcher(model, cfg, device)
+    _maybe_load_pretrained_patcher(model, cfg, device)
+
+    # Move patchers to CPU to avoid GPU memory contention
+    if hasattr(model, 'patcher') and model.patcher is not None:
+        model.patcher = model.patcher.cpu()
+        print("Moved patcher1 to CPU")
+    if hasattr(model, 'patcher2') and model.patcher2 is not None:
+        model.patcher2 = model.patcher2.cpu()
+        print("Moved patcher2 to CPU")
 
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model"])
