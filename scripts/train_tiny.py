@@ -271,6 +271,8 @@ def _evaluate_online_patcher_prefetch(
         ):
             if max_batches is not None and batch_idx >= max_batches:
                 break
+            xh = xh.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
             _, loss = model.forward_from_hidden(xh, y)
             losses.append(loss.item())
     model.train()
@@ -520,6 +522,8 @@ def main():
                     loss = loss / grad_accum_steps
             elif online_patcher_prefetch:
                 xh, y = batch
+                xh = xh.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
                 if not _dtype_probed:
                     print(f"  dtype probe — prefetched hidden: {xh.dtype}  targets: {y.dtype}")
                     _dtype_probed = True
