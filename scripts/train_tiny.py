@@ -12,6 +12,8 @@ if str(SRC) not in sys.path:
 import argparse
 import math
 import re
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -199,6 +201,82 @@ def _evaluate_from_hidden(model: TinyPatchLM, val_loader: DataLoader, device: to
     return float(sum(losses) / max(1, len(losses)))
 
 
+@torch.no_grad()
+def _compute_hidden_on_cpu_patchers(model: TinyPatchLM, x_cpu: torch.Tensor, target_device: torch.device) -> torch.Tensor:
+    if x_cpu.device.type != "cpu":
+        x_cpu = x_cpu.cpu()
+    h = model.token_emb(x_cpu)
+    if model.token_pos_emb is not None:
+        pos = torch.arange(0, x_cpu.shape[1], device=x_cpu.device).unsqueeze(0)
+        h = h + model.token_pos_emb(pos)
+    h, _ = model.patcher(h)
+    if model.patcher2 is not None:
+        h, _ = model.patcher2(h)
+    return h.to(target_device, non_blocking=True)
+
+
+def _make_online_patcher_prefetcher(
+    model: TinyPatchLM,
+    loader: DataLoader,
+    device: torch.device,
+    lookahead_batches: int,
+):
+    it = iter(loader)
+    executor = ThreadPoolExecutor(max_workers=1)
+    pending: deque[tuple[Future, torch.Tensor]] = deque()
+    exhausted = False
+
+    def _schedule_one() -> bool:
+        nonlocal exhausted
+        if exhausted:
+            return False
+        try:
+            x_cpu, y = next(it)
+        except StopIteration:
+            exhausted = True
+            return False
+        y_device = y.to(device, non_blocking=True)
+        fut = executor.submit(_compute_hidden_on_cpu_patchers, model, x_cpu, device)
+        pending.append((fut, y_device))
+        return True
+
+    for _ in range(max(1, lookahead_batches)):
+        if not _schedule_one():
+            break
+
+    def _iterator():
+        try:
+            while pending:
+                fut, y = pending.popleft()
+                _schedule_one()
+                yield fut.result(), y
+        finally:
+            executor.shutdown(wait=True, cancel_futures=False)
+
+    return _iterator()
+
+
+def _evaluate_online_patcher_prefetch(
+    model: TinyPatchLM,
+    val_loader: DataLoader,
+    device: torch.device,
+    max_batches: int | None = None,
+    lookahead_batches: int = 2,
+) -> float:
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for batch_idx, (xh, y) in enumerate(
+            _make_online_patcher_prefetcher(model, val_loader, device, lookahead_batches=lookahead_batches)
+        ):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
+            _, loss = model.forward_from_hidden(xh, y)
+            losses.append(loss.item())
+    model.train()
+    return float(sum(losses) / max(1, len(losses)))
+
+
 
 def maybe_reduce_main_lr_by_thresholds(optimizer, val_loss: float, train_cfg: dict, reduction_state: dict) -> dict:
     thresholds = [
@@ -267,6 +345,8 @@ def main():
     patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
     # Online path — patchers run on CPU inline, no cache needed
     use_cached_hidden = False
+    online_patcher_prefetch = bool(tcfg.get("online_patcher_prefetch", True)) and not use_cached_hidden
+    prefetch_lookahead_batches = int(tcfg.get("online_patcher_prefetch_lookahead_batches", 2))
     token_dir = processed_dir
     if not (token_dir / "train_tokens.npy").exists():
         token_dir = Path(cfg["data"]["processed_dir_patcher"])
@@ -277,7 +357,13 @@ def main():
         seq_len=seq_len,
         batch_size=int(tcfg["batch_size"]),
     )
-    print("Online patcher mode — patchers will run on CPU per batch")
+    if online_patcher_prefetch:
+        print(
+            f"Online patcher prefetch mode — CPU patchers prepare hidden states with "
+            f"lookahead={max(1, prefetch_lookahead_batches)} batch(es)"
+        )
+    else:
+        print("Online patcher mode — patchers will run on CPU per batch")
 
     model = _build_model_from_cfg(cfg, tokenizer, device)
     _maybe_load_pretrained_patcher(model, cfg, device)
@@ -289,6 +375,11 @@ def main():
     if hasattr(model, 'patcher2') and model.patcher2 is not None:
         model.patcher2 = model.patcher2.cpu()
         print("Moved patcher2 to CPU")
+    if online_patcher_prefetch:
+        model.token_emb = model.token_emb.cpu()
+        if model.token_pos_emb is not None:
+            model.token_pos_emb = model.token_pos_emb.cpu()
+        print("Moved token embedding stack to CPU for patcher prefetch pipeline")
 
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model"])
@@ -407,7 +498,13 @@ def main():
     # Dtype probe — log what the trunk actually receives on first batch
     _dtype_probed = False
     while step < max_steps:
-        for batch in train_loader:
+        if online_patcher_prefetch:
+            train_iter = _make_online_patcher_prefetcher(
+                model, train_loader, device, lookahead_batches=max(1, prefetch_lookahead_batches)
+            )
+        else:
+            train_iter = train_loader
+        for batch in train_iter:
             lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min) * float(lr_reduction_state.get("scale", 1.0))
             for group in optimizer.param_groups:
                 group["lr"] = lr
@@ -417,6 +514,14 @@ def main():
                 xh, y = xh.to(device), y.to(device)
                 if not _dtype_probed:
                     print(f"  dtype probe — cached hidden: {xh.dtype}  targets: {y.dtype}")
+                    _dtype_probed = True
+                with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
+                    _, loss = model.forward_from_hidden(xh, y)
+                    loss = loss / grad_accum_steps
+            elif online_patcher_prefetch:
+                xh, y = batch
+                if not _dtype_probed:
+                    print(f"  dtype probe — prefetched hidden: {xh.dtype}  targets: {y.dtype}")
                     _dtype_probed = True
                 with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
                     _, loss = model.forward_from_hidden(xh, y)
@@ -457,7 +562,18 @@ def main():
                     print(f"  synth L1 cases={s['l1_cases']} groups={s['l1_groups']} nnv2={s['nnv2_l1_cases']}{l2_str}")
 
             if step % eval_every == 0 and step > 0:
-                val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches) if use_cached_hidden else evaluate(model, val_loader, device, max_batches=eval_batches)
+                if use_cached_hidden:
+                    val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches)
+                elif online_patcher_prefetch:
+                    val_loss = _evaluate_online_patcher_prefetch(
+                        model,
+                        val_loader,
+                        device,
+                        max_batches=eval_batches,
+                        lookahead_batches=max(1, prefetch_lookahead_batches),
+                    )
+                else:
+                    val_loss = evaluate(model, val_loader, device, max_batches=eval_batches)
                 print(f"step={step} val_loss={val_loss:.4f}")
                 if val_loss < best_val:
                     best_val = val_loss
