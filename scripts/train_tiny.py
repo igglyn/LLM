@@ -22,6 +22,7 @@ from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders, evaluate
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
 from blt_lite.ademamix import AdEMAMix
+from blt_lite.ademamix_fused import AdEMAMixFused
 from blt_lite.synthetic_batch import SyntheticBatchHarness
 from torch.optim import AdamW
 
@@ -310,6 +311,27 @@ def main():
             weight_decay=float(tcfg["weight_decay"]),
         )
         print(f"Using AdEMAMix optimizer")
+    elif optimizer_type == "ademamix_fused":
+        betas = (
+            float(tcfg.get("beta1", 0.9)),
+            float(tcfg.get("beta2", 0.999)),
+            float(tcfg.get("beta3", 0.9999)),
+        )
+        optimizer = AdEMAMixFused(
+            model.parameters(),
+            lr=float(tcfg.get("lr_max", 3e-4)),
+            betas=betas,
+            alpha=float(tcfg.get("alpha", 2.0)),
+            t_beta3=tcfg.get("beta3_warmup", None),
+            t_alpha=tcfg.get("alpha_warmup", None),
+            weight_decay=float(tcfg["weight_decay"]),
+            slow_ema_reset_steps=tcfg.get("slow_ema_reset_steps", None),
+            backend=str(tcfg.get("ademamix_backend", "eager")).lower(),
+            state_backend=str(tcfg.get("ademamix_state_backend", "fp32")).lower(),
+            quant_block_size=int(tcfg.get("ademamix_quant_block_size", 256)),
+            use_foreach=bool(tcfg.get("ademamix_use_foreach", True)),
+        )
+        print("Using AdEMAMixFused optimizer")
     else:
         optimizer = AdamW(
             model.parameters(),

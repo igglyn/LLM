@@ -92,7 +92,12 @@ patcher_train:
   out_dir: outputs/patcher
   amp_enabled: true
   amp_dtype: float16
-  optimizer: adamamix
+  # Supported: adamw | ademamix | ademamix_fused
+  optimizer: ademamix
+  ademamix_backend: eager          # eager | fused
+  ademamix_state_backend: fp32     # fp32 | qint8
+  ademamix_quant_block_size: 256
+  ademamix_use_foreach: true
   slow_ema_window: 50
   slow_ema_percentile: 20.0
   slow_ema_oom_step: 2
@@ -121,7 +126,12 @@ train:
   amp_enabled: true
   amp_dtype: float16
   out_dir: outputs
+  # Supported: adamw | ademamix | ademamix_fused
   optimizer: ademamix
+  ademamix_backend: eager          # eager | fused
+  ademamix_state_backend: fp32     # fp32 | qint8
+  ademamix_quant_block_size: 256
+  ademamix_use_foreach: true
   beta3: 0.9999
   alpha: 2
   beta3_warmup: ~
@@ -153,4 +163,3 @@ synthetic_batch:
     group_capacity: 512
     nnv5_chunk_size: 64
     nnv2_case_capacity: 0
-
