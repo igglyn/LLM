@@ -23,16 +23,16 @@ Deliver a production-ready fused AdEMAMix optimizer path that preserves local se
 - [x] Add backward-compatibility migration in `__setstate__` for legacy `m1`/`m2` state dicts.
 
 ### Phase 3 — Remaining implementation work
-- [ ] Add a true fused kernel backend (Triton/CUDA) behind the same optimizer API.
-- [ ] Define and implement one quantization backend for optimizer state:
-  - [ ] bnb-style blockwise int8 (`qmap` + `absmax`) **or**
+- [x] Add a true fused kernel backend (Triton/CUDA) behind the same optimizer API.
+- [x] Define and implement one quantization backend for optimizer state:
+  - [x] bnb-style blockwise int8 (`qmap` + `absmax`) **or**
   - [ ] FlashOptim grouped quantization + scales.
-- [ ] Add backend switch and compatibility layer between eager and fused implementations.
-- [ ] Add checkpoint compatibility matrix tests:
-  - [ ] old eager state -> new layout,
-  - [ ] eager <-> fused,
-  - [ ] fp32 <-> quantized state (if enabled).
-- [ ] Add performance benchmarks and acceptance thresholds.
+- [x] Add backend switch and compatibility layer between eager and fused implementations.
+- [x] Add checkpoint compatibility matrix tests:
+  - [x] old eager state -> new layout,
+  - [x] eager <-> fused,
+  - [x] fp32 <-> quantized state (if enabled).
+- [x] Add performance benchmarks and acceptance thresholds.
 
 ## Near-term next steps
 1. Implement fused backend scaffold with no quantization first (correctness-first).

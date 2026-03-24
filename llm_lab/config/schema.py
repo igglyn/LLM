@@ -90,6 +90,9 @@ class TrainCfg:
     ademamix_t_beta3: int | None = None
     ademamix_slow_ema_reset_steps: int | None = None
     ademamix_use_foreach: bool = True
+    ademamix_backend: Literal["eager", "fused"] = "eager"
+    ademamix_state_backend: Literal["fp32", "qint8"] = "fp32"
+    ademamix_quant_block_size: int = 256
 
     enable_aux_reconstruction: bool = False
     aux_reconstruction_weight: float = 0.0

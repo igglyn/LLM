@@ -49,6 +49,9 @@ def build_optimizer(
     ademamix_t_beta3: Optional[int] = None,
     ademamix_slow_ema_reset_steps: Optional[int] = None,
     ademamix_use_foreach: bool = True,
+    ademamix_backend: str = "eager",
+    ademamix_state_backend: str = "fp32",
+    ademamix_quant_block_size: int = 256,
 ) -> torch.optim.Optimizer:
     """Build optimizer with explicit train mode control and logging."""
     _apply_train_mode(model, mode)
@@ -84,6 +87,9 @@ def build_optimizer(
             t_beta3=ademamix_t_beta3,
             slow_ema_reset_steps=ademamix_slow_ema_reset_steps,
             use_foreach=ademamix_use_foreach,
+            backend=ademamix_backend,
+            state_backend=ademamix_state_backend,
+            quant_block_size=ademamix_quant_block_size,
         )
 
     raise ValueError(f"Unsupported optimizer_name: {optimizer_name}")
