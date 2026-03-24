@@ -205,10 +205,17 @@ def _evaluate_from_hidden(model: TinyPatchLM, val_loader: DataLoader, device: to
 def _compute_hidden_on_cpu_patchers(model: TinyPatchLM, x_cpu: torch.Tensor, target_device: torch.device) -> torch.Tensor:
     if x_cpu.device.type != "cpu":
         x_cpu = x_cpu.cpu()
-    h = model.token_emb(x_cpu)
+
+    emb_device = model.token_emb.weight.device
+    patcher_device = next(model.patcher.parameters()).device
+
+    x_for_emb = x_cpu.to(emb_device, non_blocking=True)
+    h = model.token_emb(x_for_emb)
     if model.token_pos_emb is not None:
-        pos = torch.arange(0, x_cpu.shape[1], device=x_cpu.device).unsqueeze(0)
+        pos = torch.arange(0, x_for_emb.shape[1], device=emb_device).unsqueeze(0)
         h = h + model.token_pos_emb(pos)
+
+    h = h.to(patcher_device, non_blocking=True)
     h, _ = model.patcher(h)
     if model.patcher2 is not None:
         h, _ = model.patcher2(h)
@@ -378,10 +385,7 @@ def main():
         model.patcher2 = model.patcher2.cpu()
         print("Moved patcher2 to CPU")
     if online_patcher_prefetch:
-        model.token_emb = model.token_emb.cpu()
-        if model.token_pos_emb is not None:
-            model.token_pos_emb = model.token_pos_emb.cpu()
-        print("Moved token embedding stack to CPU for patcher prefetch pipeline")
+        print("Keeping token embedding stack on model device to preserve tied LM head weights")
 
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model"])
