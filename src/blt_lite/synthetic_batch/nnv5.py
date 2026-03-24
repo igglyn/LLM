@@ -1,3 +1,4 @@
+
 """nnv5.py — NNv5Block and NNv5CapacityError.
 
 All state is stored as torch.int64 tensors on device.

@@ -49,8 +49,8 @@ print(f"  device: {DEVICE}")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_layer(chunk_dim=36, case_capacity=512,
-               group_capacity=256, shard_size=16, n_chunks=1):
+def make_layer(chunk_dim=108, case_capacity=1024,
+               group_capacity=512, shard_size=16, n_chunks=1):
     assert chunk_dim % VALUES_PER_BLOCK == 0, \
         f"chunk_dim must be divisible by {VALUES_PER_BLOCK}"
     n_blocks = chunk_dim // VALUES_PER_BLOCK
@@ -127,31 +127,31 @@ def run_learning_loop(layer, embeddings: torch.Tensor, n_steps: int,
 
 def test_float_packing_roundtrip():
     """float32 → C4F4M2+S B4B9 → uint64 should produce correct shape."""
-    x   = torch.randn(8, 36, device=DEVICE).clamp(-3.0, 3.0)
+    x   = torch.randn(8, 108, device=DEVICE).clamp(-3.0, 3.0)
     u64 = float_to_uint64(x)
     # 36 values per block, 2 uint64 words per block → (8, 2)
-    assert u64.shape == (8, 2), f"Expected (8, 2) got {u64.shape}"
+    assert u64.shape == (8, 6), f"Expected (8, 6) got {u64.shape}"
     print("  PASS  float packing roundtrip")
 
 
 def test_nnlayer_sees_float_bits():
     """NNLayer should accept float-packed uint64 without error."""
-    layer = make_layer(chunk_dim=36)
-    x     = torch.randn(8, 36, device=DEVICE)
+    layer = make_layer(chunk_dim=108)
+    x     = torch.randn(8, 108, device=DEVICE)
     toks  = float_to_uint64(x)
 
     assert toks.shape == (8, layer.nnv5.match_words), \
         f"Token shape mismatch: {toks.shape} vs expected (8, {layer.nnv5.match_words})"
 
     out, diff, emit, wm, choices = layer.forward(toks)
-    assert out.shape == (8, 36), f"Output shape wrong: {out.shape}"
+    assert out.shape == (8, 108), f"Output shape wrong: {out.shape}"
     print("  PASS  nnlayer sees float bits")
 
 
 def test_cases_grow_over_steps():
     """NNv5 case count should grow as new embeddings are presented."""
-    layer = make_layer(chunk_dim=36, case_capacity=256)
-    embs  = make_embedding_dist(64, 36, seed=0)
+    layer = make_layer(chunk_dim=108, case_capacity=512)
+    embs  = make_embedding_dist(64, 108, seed=0)
 
     cases_0 = layer.nnv5.array_used
     for i in range(20):
@@ -169,9 +169,9 @@ def test_cases_grow_over_steps():
 
 def test_mse_decreases():
     """MSE loss should decrease over training steps on a fixed distribution."""
-    layer = make_layer(chunk_dim=36, case_capacity=512,
-                       group_capacity=256)
-    embs  = make_embedding_dist(128, 36, seed=1, n_clusters=4)
+    layer = make_layer(chunk_dim=108, case_capacity=1024,
+                       group_capacity=512)
+    embs  = make_embedding_dist(128, 108, seed=1, n_clusters=4)
 
     history = run_learning_loop(layer, embs, n_steps=300, batch_size=16)
 
@@ -194,11 +194,11 @@ def test_mse_decreases():
 
 def test_case_stabilization():
     """Case count should stabilize after sufficient training on fixed dist."""
-    layer = make_layer(chunk_dim=36, case_capacity=512,
-                       group_capacity=256)
-    embs  = make_embedding_dist(64, 36, seed=2, n_clusters=4)
+    layer = make_layer(chunk_dim=108, case_capacity=1024,
+                       group_capacity=512)
+    embs  = make_embedding_dist(64, 108, seed=2, n_clusters=4)
 
-    history = run_learning_loop(layer, embs, n_steps=300, batch_size=8)
+    history = run_learning_loop(layer, embs, n_steps=300, batch_size=16)
 
     # Check case growth rate slows in second half
     cases = [c for _, _, c, *_ in history]
@@ -215,11 +215,11 @@ def test_case_stabilization():
 
 def test_clustered_vs_random():
     """Clustered embeddings should produce fewer cases than random (more structure)."""
-    layer_c = make_layer(chunk_dim=36, case_capacity=512)
-    layer_r = make_layer(chunk_dim=36, case_capacity=512)
+    layer_c = make_layer(chunk_dim=108, case_capacity=1024)
+    layer_r = make_layer(chunk_dim=108, case_capacity=1024)
 
-    clustered = make_embedding_dist(128, 36, seed=3, n_clusters=4)
-    random    = torch.randn(128, 36, device=DEVICE)
+    clustered = make_embedding_dist(128, 108, seed=3, n_clusters=4)
+    random    = torch.randn(128, 108, device=DEVICE)
 
     for embs, layer in [(clustered, layer_c), (random, layer_r)]:
         for i in range(0, 64, 8):
@@ -244,10 +244,10 @@ def test_convergence_benchmark():
     Benchmark: track MSE, case count, and timing over a full training run.
     Prints a summary table — not a pass/fail test, diagnostic only.
     """
-    layer = make_layer(chunk_dim=36, case_capacity=512,
-                       group_capacity=256)
+    layer = make_layer(chunk_dim=108, case_capacity=1024,
+                       group_capacity=512)
     layer.use_nnv2 = False  # disable NNv2 to test raw NNv5 group count
-    embs  = make_embedding_dist(256, 36, seed=4, n_clusters=8)
+    embs  = make_embedding_dist(256, 108, seed=4, n_clusters=8)
 
     print("\n  step  | mse     | cases | groups | nnv2 | adapted | emit_bits")
     print("  ------|---------|-------|--------|------|---------|----------")
@@ -300,9 +300,9 @@ def test_adapter_initialisation_rate():
     Tracks how quickly adapter cases get frontloaded from zero.
     All cases should be initialised within a few passes over the dataset.
     """
-    layer = make_layer(chunk_dim=36, case_capacity=256,
-                       group_capacity=256)
-    embs  = make_embedding_dist(128, 36, seed=5, n_clusters=4)
+    layer = make_layer(chunk_dim=108, case_capacity=512,
+                       group_capacity=512)
+    embs  = make_embedding_dist(128, 108, seed=5, n_clusters=4)
     opt   = torch.optim.Adam(layer.adapter.parameters(), lr=0.01)
 
     uninit_counts = []

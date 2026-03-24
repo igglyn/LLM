@@ -53,16 +53,19 @@ def encode_block_float(x: np.ndarray) -> np.ndarray:
     Encode float32 array to C4F4M2+S B4B9 block float format.
 
     x:       (N, D) float32, values expected in roughly [-3, 3]
-    returns: (N, D // VALUES_PER_BLOCK, 2) uint64
+    returns: (N, n_blocks, 2) uint64
              2 uint64 words per 128-bit block
 
-    D must be divisible by VALUES_PER_BLOCK (36).
+    D is padded with zeros to the nearest multiple of VALUES_PER_BLOCK.
     Values are clamped to [-3, 3] before encoding.
     """
     N, D = x.shape
-    assert D % VALUES_PER_BLOCK == 0, \
-        f"D={D} must be divisible by VALUES_PER_BLOCK={VALUES_PER_BLOCK}"
-    n_blocks = D // VALUES_PER_BLOCK
+    # Pad to nearest multiple of VALUES_PER_BLOCK
+    remainder = D % VALUES_PER_BLOCK
+    if remainder != 0:
+        pad = VALUES_PER_BLOCK - remainder
+        x = np.concatenate([x, np.zeros((N, pad), dtype=np.float32)], axis=1)
+    n_blocks = x.shape[1] // VALUES_PER_BLOCK
 
     x = np.clip(x, -3.0, 3.0).astype(np.float32)
     out = np.zeros((N, n_blocks, 2), dtype=np.uint64)
@@ -190,16 +193,26 @@ def decode_block_float(encoded: np.ndarray, D: int) -> np.ndarray:
 def encode_to_uint64_flat(x: np.ndarray) -> np.ndarray:
     """
     Encode and flatten to (N, n_blocks * 2) uint64 for NNv5 input.
-    x: (N, D) float32
+    x: (N, D) float32 — D padded to nearest multiple of VALUES_PER_BLOCK.
     """
     encoded = encode_block_float(x)             # (N, n_blocks, 2)
     N, n_blocks, _ = encoded.shape
     return encoded.reshape(N, n_blocks * 2)     # (N, match_words)
 
 
+def n_blocks_for(D: int) -> int:
+    """Number of 128-bit blocks needed to encode D float values (with padding)."""
+    return (D + VALUES_PER_BLOCK - 1) // VALUES_PER_BLOCK
+
+
+def bool_dim_for(D: int) -> int:
+    """NNv5 bool_dim (match_words * 64) for encoding D float values."""
+    return n_blocks_for(D) * 2 * 64
+
+
 def encode_torch(x: torch.Tensor) -> np.ndarray:
     """
     Convenience wrapper — accepts torch tensor, returns uint64 numpy.
-    x: (N, D) float32 torch tensor
+    x: (N, D) float32 torch tensor — D need not be multiple of VALUES_PER_BLOCK.
     """
     return encode_to_uint64_flat(x.cpu().numpy())
