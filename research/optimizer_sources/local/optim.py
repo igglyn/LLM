@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from torch import nn
-
-from llm_lab.train.ademamix_fused import AdEMAMixFused
 
 
 def _set_requires_grad(params: list[nn.Parameter], enabled: bool) -> None:
@@ -42,20 +38,12 @@ def build_optimizer(
     lr: float,
     weight_decay: float = 0.0,
     mode: str = "full",
-    optimizer_name: str = "adamw",
-    ademamix_betas: tuple[float, float, float] = (0.9, 0.999, 0.9999),
-    ademamix_alpha: float = 5.0,
-    ademamix_t_alpha: Optional[int] = None,
-    ademamix_t_beta3: Optional[int] = None,
-    ademamix_slow_ema_reset_steps: Optional[int] = None,
-    ademamix_use_foreach: bool = True,
 ) -> torch.optim.Optimizer:
-    """Build optimizer with explicit train mode control and logging."""
+    """Build AdamW with explicit train mode control and logging."""
     _apply_train_mode(model, mode)
     all_params = list(model.parameters())
 
     print(f"train mode: {mode}")
-    print(f"optimizer: {optimizer_name}")
 
     # Prefer explicit component grouping when available.
     if hasattr(model, "component_param_counts") and callable(model.component_param_counts):
@@ -71,19 +59,4 @@ def build_optimizer(
     trainable_count = sum(p.numel() for p in trainable_params)
     print(f"trainable parameters: {trainable_count}/{total_count}")
 
-    if optimizer_name == "adamw":
-        return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
-    if optimizer_name == "ademamix_fused":
-        return AdEMAMixFused(
-            trainable_params,
-            lr=lr,
-            weight_decay=weight_decay,
-            betas=ademamix_betas,
-            alpha=ademamix_alpha,
-            t_alpha=ademamix_t_alpha,
-            t_beta3=ademamix_t_beta3,
-            slow_ema_reset_steps=ademamix_slow_ema_reset_steps,
-            use_foreach=ademamix_use_foreach,
-        )
-
-    raise ValueError(f"Unsupported optimizer_name: {optimizer_name}")
+    return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)

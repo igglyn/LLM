@@ -79,8 +79,18 @@ class TrainCfg:
 
     steps: int = 100
     lr: float = 1e-3
+    weight_decay: float = 0.0
+    optimizer: Literal["adamw", "ademamix_fused"] = "adamw"
     seed: int = 0
     mode: str = "full"
+
+    ademamix_betas: tuple[float, float, float] = (0.9, 0.999, 0.9999)
+    ademamix_alpha: float = 5.0
+    ademamix_t_alpha: int | None = None
+    ademamix_t_beta3: int | None = None
+    ademamix_slow_ema_reset_steps: int | None = None
+    ademamix_use_foreach: bool = True
+
     enable_aux_reconstruction: bool = False
     aux_reconstruction_weight: float = 0.0
     preserve_memory_across_batches: bool = True

@@ -137,7 +137,19 @@ def main() -> None:
                 return self.head(x_head)
 
         pre_model = _PrecomputedPathModel(model)
-        optimizer = build_optimizer(pre_model, lr=cfg.train.lr, mode=train_mode)
+        optimizer = build_optimizer(
+            pre_model,
+            lr=cfg.train.lr,
+            weight_decay=cfg.train.weight_decay,
+            mode=train_mode,
+            optimizer_name=cfg.train.optimizer,
+            ademamix_betas=cfg.train.ademamix_betas,
+            ademamix_alpha=cfg.train.ademamix_alpha,
+            ademamix_t_alpha=cfg.train.ademamix_t_alpha,
+            ademamix_t_beta3=cfg.train.ademamix_t_beta3,
+            ademamix_slow_ema_reset_steps=cfg.train.ademamix_slow_ema_reset_steps,
+            ademamix_use_foreach=cfg.train.ademamix_use_foreach,
+        )
         metrics = _train_loop_precomputed(
             model=pre_model,
             dataloader=dataloader,
@@ -183,7 +195,19 @@ def main() -> None:
             drop_last=True,
         )
 
-        optimizer = build_optimizer(model, lr=cfg.train.lr, mode=train_mode)
+        optimizer = build_optimizer(
+            model,
+            lr=cfg.train.lr,
+            weight_decay=cfg.train.weight_decay,
+            mode=train_mode,
+            optimizer_name=cfg.train.optimizer,
+            ademamix_betas=cfg.train.ademamix_betas,
+            ademamix_alpha=cfg.train.ademamix_alpha,
+            ademamix_t_alpha=cfg.train.ademamix_t_alpha,
+            ademamix_t_beta3=cfg.train.ademamix_t_beta3,
+            ademamix_slow_ema_reset_steps=cfg.train.ademamix_slow_ema_reset_steps,
+            ademamix_use_foreach=cfg.train.ademamix_use_foreach,
+        )
 
         metrics = train_loop(
             model=model,
