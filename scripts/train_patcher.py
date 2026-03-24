@@ -20,6 +20,7 @@ from blt_lite.tokenizer import FixedPatchTokenizer
 from blt_lite.train import build_dataloaders
 from blt_lite.utils import ensure_dir, get_device, load_config, set_seed
 from blt_lite.ademamix import AdEMAMix
+from blt_lite.ademamix_fused import AdEMAMixFused
 from torch.optim import AdamW
 
 
@@ -186,6 +187,32 @@ def main():
             oom_step=float(patcher_train.get("slow_ema_oom_step", 1.0)),
         )
         print(f"Using AdEMAMix optimizer (slow EMA reset on OOM envelope crossing)")
+    elif optimizer_type == "ademamix_fused":
+        betas = (
+            float(patcher_train.get("beta1", 0.9)),
+            float(patcher_train.get("beta2", 0.999)),
+            float(patcher_train.get("beta3", 0.9999)),
+        )
+        optimizer = AdEMAMixFused(
+            params,
+            lr=float(patcher_train.get("lr", 3e-4)),
+            betas=betas,
+            alpha=float(patcher_train.get("alpha", 2.0)),
+            t_beta3=patcher_train.get("beta3_warmup", None),
+            t_alpha=patcher_train.get("alpha_warmup", None),
+            weight_decay=float(patcher_train.get("weight_decay", 0.01)),
+            slow_ema_reset_steps=patcher_train.get("slow_ema_reset_steps", None),
+            backend=str(patcher_train.get("ademamix_backend", "eager")).lower(),
+            state_backend=str(patcher_train.get("ademamix_state_backend", "fp32")).lower(),
+            quant_block_size=int(patcher_train.get("ademamix_quant_block_size", 256)),
+            use_foreach=bool(patcher_train.get("ademamix_use_foreach", True)),
+        )
+        oom_tracker = OOMEnvelopeTracker(
+            window_size=int(patcher_train.get("slow_ema_window", 50)),
+            percentile=float(patcher_train.get("slow_ema_percentile", 20.0)),
+            oom_step=float(patcher_train.get("slow_ema_oom_step", 1.0)),
+        )
+        print("Using AdEMAMixFused optimizer (slow EMA reset on OOM envelope crossing)")
     else:
         optimizer = AdamW(
             params,

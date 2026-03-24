@@ -169,6 +169,25 @@ class AdEMAMixFused(torch.optim.Optimizer):
             group.update(override)
         return out
 
+    @torch.no_grad()
+    def reset_slow_ema(self) -> None:
+        """Reset the slow EMA accumulator(s) to zero.
+
+        Mirrors :meth:`blt_lite.ademamix.AdEMAMix.reset_slow_ema` so training
+        loops can call this hook regardless of which AdEMAMix variant is used.
+        """
+        for group in self.param_groups:
+            state_backend = group.get("state_backend", "fp32")
+            block_size = int(group.get("quant_block_size", 256))
+            for p in group["params"]:
+                state = self.state.get(p)
+                if not state:
+                    continue
+
+                m1_m2, nu = self._materialize_state(state, p, state_backend, block_size)
+                m1_m2[1].zero_()
+                self._store_state(state, m1_m2, nu, state_backend, block_size)
+
     @staticmethod
     def _scheduled_alpha(step: int, alpha: float, t_alpha: Optional[int]) -> float:
         if t_alpha is None:
