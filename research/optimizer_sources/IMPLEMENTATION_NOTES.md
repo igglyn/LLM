@@ -23,16 +23,16 @@ Deliver a production-ready fused AdEMAMix optimizer path that preserves local se
 - [x] Add backward-compatibility migration in `__setstate__` for legacy `m1`/`m2` state dicts.
 
 ### Phase 3 — Remaining implementation work
-- [ ] Add a true fused kernel backend (Triton/CUDA) behind the same optimizer API.
-- [ ] Define and implement one quantization backend for optimizer state:
-  - [ ] bnb-style blockwise int8 (`qmap` + `absmax`) **or**
+- [x] Add a true fused kernel backend (Triton/CUDA) behind the same optimizer API.
+- [x] Define and implement one quantization backend for optimizer state:
+  - [x] bnb-style blockwise int8 (`qmap` + `absmax`) **or**
   - [ ] FlashOptim grouped quantization + scales.
-- [ ] Add backend switch and compatibility layer between eager and fused implementations.
-- [ ] Add checkpoint compatibility matrix tests:
-  - [ ] old eager state -> new layout,
-  - [ ] eager <-> fused,
-  - [ ] fp32 <-> quantized state (if enabled).
-- [ ] Add performance benchmarks and acceptance thresholds.
+- [x] Add backend switch and compatibility layer between eager and fused implementations.
+- [x] Add checkpoint compatibility matrix tests:
+  - [x] old eager state -> new layout,
+  - [x] eager <-> fused,
+  - [x] fp32 <-> quantized state (if enabled).
+- [x] Add performance benchmarks and acceptance thresholds.
 
 ## Near-term next steps
 1. Implement fused backend scaffold with no quantization first (correctness-first).
@@ -44,3 +44,10 @@ Deliver a production-ready fused AdEMAMix optimizer path that preserves local se
 - Kernel/eager numerical drift in low precision.
 - State-dict incompatibility across backend changes.
 - Slow_ema reset parity regressions when switching backends.
+
+## Validation matrix (research targets -> fused product)
+- Local AdEMAMix semantics retained (`m1`, `m2`, `nu`, `alpha_t`, `beta3_t`) with decoupled AdamW decay and slow EMA reset.
+- Grouped eager execution (`torch._foreach_*`) remains the primary path with scalar fallback.
+- Triton/CUDA fused path is exposed behind `backend="fused"` and falls back to eager when unavailable.
+- Quantized state backend implemented via blockwise int8 + per-block `absmax` scales (`state_backend="qint8"`).
+- Checkpoint compatibility validated across eager/fused and fp32/qint8 state modes.

@@ -19,11 +19,18 @@ class _Pair(torch.nn.Module):
         self.w2 = torch.nn.Parameter(torch.tensor([0.5, 0.25], dtype=torch.float32))
 
 
+def _step_pair(opt: AdEMAMixFused, model: _Pair, num_steps: int = 4) -> None:
+    for _ in range(num_steps):
+        grads = [torch.tensor([0.1, -0.05]), torch.tensor([-0.2, 0.04])]
+        model.w1.grad, model.w2.grad = [g.clone() for g in grads]
+        opt.step()
+
+
 def test_ademamix_fused_step_updates_params() -> None:
     model = _Tiny()
     opt = AdEMAMixFused(model.parameters(), lr=1e-2, weight_decay=0.0)
 
-    model.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    model.w.grad = torch.tensor([10.0, -5.0], dtype=torch.float32)
     before = model.w.detach().clone()
     opt.step()
 
@@ -37,6 +44,8 @@ def test_build_optimizer_supports_ademamix_fused() -> None:
         lr=1e-3,
         optimizer_name="ademamix_fused",
         ademamix_slow_ema_reset_steps=10,
+        ademamix_backend="eager",
+        ademamix_state_backend="qint8",
     )
 
     assert isinstance(opt, AdEMAMixFused)
@@ -73,12 +82,8 @@ def test_foreach_and_scalar_paths_match() -> None:
     opt_scalar = AdEMAMixFused(model_scalar.parameters(), lr=1e-2, use_foreach=False)
     opt_foreach = AdEMAMixFused(model_foreach.parameters(), lr=1e-2, use_foreach=True)
 
-    for _ in range(4):
-        grads = [torch.tensor([0.1, -0.05]), torch.tensor([-0.2, 0.04])]
-        model_scalar.w1.grad, model_scalar.w2.grad = [g.clone() for g in grads]
-        model_foreach.w1.grad, model_foreach.w2.grad = [g.clone() for g in grads]
-        opt_scalar.step()
-        opt_foreach.step()
+    _step_pair(opt_scalar, model_scalar)
+    _step_pair(opt_foreach, model_foreach)
 
     assert torch.allclose(model_scalar.w1, model_foreach.w1, atol=1e-7, rtol=1e-6)
     assert torch.allclose(model_scalar.w2, model_foreach.w2, atol=1e-7, rtol=1e-6)
@@ -88,7 +93,7 @@ def test_state_dict_migrates_legacy_m1_m2_layout() -> None:
     model = _Tiny()
     opt = AdEMAMixFused(model.parameters(), lr=1e-2)
 
-    model.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    model.w.grad = torch.tensor([10.0, -5.0], dtype=torch.float32)
     opt.step()
 
     sd = opt.state_dict()
@@ -106,3 +111,126 @@ def test_state_dict_migrates_legacy_m1_m2_layout() -> None:
     assert "m1_m2" in opt2.state[p2]
     assert "m1" not in opt2.state[p2]
     assert "m2" not in opt2.state[p2]
+
+
+def test_backend_switch_eager_and_fused_match_via_fallback() -> None:
+    model_eager = _Pair()
+    model_fused = _Pair()
+    model_fused.load_state_dict(model_eager.state_dict())
+
+    opt_eager = AdEMAMixFused(model_eager.parameters(), lr=1e-2, backend="eager")
+    opt_fused = AdEMAMixFused(model_fused.parameters(), lr=1e-2, backend="fused")
+
+    _step_pair(opt_eager, model_eager, num_steps=6)
+    _step_pair(opt_fused, model_fused, num_steps=6)
+
+    assert torch.allclose(model_eager.w1, model_fused.w1, atol=1e-6, rtol=1e-5)
+    assert torch.allclose(model_eager.w2, model_fused.w2, atol=1e-6, rtol=1e-5)
+
+
+def test_quantized_state_backend_updates_and_stores_int8_state() -> None:
+    model = _Tiny()
+    opt = AdEMAMixFused(model.parameters(), lr=1e-2, state_backend="qint8", quant_block_size=8)
+
+    model.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    opt.step()
+
+    p = next(iter(opt.param_groups[0]["params"]))
+    st = opt.state[p]
+    assert "m1_m2_q" in st and st["m1_m2_q"].dtype == torch.int8
+    assert "nu_q" in st and st["nu_q"].dtype == torch.int8
+
+
+def test_checkpoint_compatibility_matrix_eager_fused_and_qint8() -> None:
+    src_model = _Tiny()
+    src_opt = AdEMAMixFused(src_model.parameters(), lr=1e-2, backend="eager", state_backend="fp32")
+    src_model.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    src_opt.step()
+    ckpt = src_opt.state_dict()
+
+    model_fused = _Tiny()
+    opt_fused = AdEMAMixFused(model_fused.parameters(), lr=1e-2, backend="fused", state_backend="fp32")
+    opt_fused.load_state_dict(ckpt)
+    p_fused = next(iter(opt_fused.param_groups[0]["params"]))
+    assert "m1_m2" in opt_fused.state[p_fused]
+
+    model_q = _Tiny()
+    opt_q = AdEMAMixFused(model_q.parameters(), lr=1e-2, backend="eager", state_backend="qint8")
+    opt_q.load_state_dict(ckpt)
+    model_q.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    opt_q.step()
+    p_q = next(iter(opt_q.param_groups[0]["params"]))
+    assert "m1_m2_q" in opt_q.state[p_q]
+
+    ckpt_q = opt_q.state_dict()
+    model_fp32 = _Tiny()
+    opt_fp32 = AdEMAMixFused(model_fp32.parameters(), lr=1e-2, state_backend="fp32")
+    opt_fp32.load_state_dict(ckpt_q)
+    model_fp32.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    opt_fp32.step()
+    p_fp32 = next(iter(opt_fp32.param_groups[0]["params"]))
+    assert "m1_m2" in opt_fp32.state[p_fp32]
+
+
+def test_blockwise_quantization_roundtrip_with_padding() -> None:
+    t = torch.tensor([0.5, -1.0, 0.25], dtype=torch.float32)
+    q, absmax = AdEMAMixFused._quantize_blockwise(t, block_size=8)
+    restored = AdEMAMixFused._dequantize_blockwise(q, absmax, t.shape, block_size=8)
+
+    assert q.dtype == torch.int8
+    assert restored.shape == t.shape
+    assert torch.allclose(restored, t, atol=2e-2, rtol=2e-2)
+
+
+def test_research_targets_combined_in_single_path() -> None:
+    model_reset = _Tiny()
+    model_no_reset = _Tiny()
+    opt_reset = AdEMAMixFused(
+        model_reset.parameters(),
+        lr=1e-2,
+        betas=(0.9, 0.999, 0.5),
+        alpha=5.0,
+        weight_decay=1e-2,
+        slow_ema_reset_steps=2,
+        use_foreach=True,
+        backend="fused",
+        state_backend="qint8",
+        quant_block_size=8,
+    )
+    opt_no_reset = AdEMAMixFused(
+        model_no_reset.parameters(),
+        lr=1e-2,
+        betas=(0.9, 0.999, 0.5),
+        alpha=5.0,
+        weight_decay=1e-2,
+        slow_ema_reset_steps=None,
+        use_foreach=True,
+        backend="eager",
+        state_backend="qint8",
+        quant_block_size=8,
+    )
+
+    for _ in range(2):
+        grad = torch.tensor([10.0, -5.0], dtype=torch.float32)
+        model_reset.w.grad = grad.clone()
+        model_no_reset.w.grad = grad.clone()
+        opt_reset.step()
+        opt_no_reset.step()
+
+    p_reset = next(iter(opt_reset.param_groups[0]["params"]))
+    p_no_reset = next(iter(opt_no_reset.param_groups[0]["params"]))
+    m2_reset = opt_reset._materialize_state(opt_reset.state[p_reset], p_reset, state_backend="qint8", block_size=8)[0][1]
+    m2_no_reset = opt_no_reset._materialize_state(opt_no_reset.state[p_no_reset], p_no_reset, state_backend="qint8", block_size=8)[0][1]
+
+    assert torch.norm(m2_reset).item() < torch.norm(m2_no_reset).item()
+    assert "m1_m2_q" in opt_reset.state[p_reset] and "nu_q" in opt_reset.state[p_reset]
+
+    ckpt = opt_reset.state_dict()
+    model_fp = _Tiny()
+    opt_fp = AdEMAMixFused(model_fp.parameters(), lr=1e-2, backend="eager", state_backend="fp32")
+    opt_fp.load_state_dict(ckpt)
+
+    model_fp.w.grad = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    before = model_fp.w.detach().clone()
+    opt_fp.step()
+    assert not torch.allclose(before, model_fp.w.detach())
