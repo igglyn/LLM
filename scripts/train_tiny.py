@@ -228,6 +228,8 @@ def _make_online_patcher_prefetcher(
     device: torch.device,
     lookahead_batches: int,
 ):
+    max_lookahead = 3
+    lookahead_batches = max(1, min(int(lookahead_batches), max_lookahead))
     it = iter(loader)
     executor = ThreadPoolExecutor(max_workers=1)
     pending: deque[tuple[Future, torch.Tensor]] = deque()
@@ -242,9 +244,8 @@ def _make_online_patcher_prefetcher(
         except StopIteration:
             exhausted = True
             return False
-        y_device = y.to(device, non_blocking=True)
         fut = executor.submit(_compute_hidden_on_cpu_patchers, model, x_cpu, device)
-        pending.append((fut, y_device))
+        pending.append((fut, y))
         return True
 
     for _ in range(max(1, lookahead_batches)):
@@ -256,7 +257,11 @@ def _make_online_patcher_prefetcher(
             while pending:
                 fut, y = pending.popleft()
                 _schedule_one()
-                yield fut.result(), y
+                xh = fut.result()
+                yield xh, y
+                del xh
+                del y
+                del fut
         finally:
             executor.shutdown(wait=True, cancel_futures=False)
 
@@ -355,7 +360,8 @@ def main():
     # Online path — patchers run on CPU inline, no cache needed
     use_cached_hidden = False
     online_patcher_prefetch = bool(tcfg.get("online_patcher_prefetch", True)) and not use_cached_hidden
-    prefetch_lookahead_batches = int(tcfg.get("online_patcher_prefetch_lookahead_batches", 2))
+    configured_prefetch_lookahead = int(tcfg.get("online_patcher_prefetch_lookahead_batches", 2))
+    prefetch_lookahead_batches = min(3, configured_prefetch_lookahead)
     token_dir = processed_dir
     if not (token_dir / "train_tokens.npy").exists():
         token_dir = Path(cfg["data"]["processed_dir_patcher"])
@@ -367,6 +373,11 @@ def main():
         batch_size=int(tcfg["batch_size"]),
     )
     if online_patcher_prefetch:
+        if configured_prefetch_lookahead != prefetch_lookahead_batches:
+            print(
+                "Capped online patcher prefetch lookahead to 3 batches to avoid GPU buffer over-commit "
+                f"(configured={configured_prefetch_lookahead})"
+            )
         print(
             f"Online patcher prefetch mode — CPU patchers prepare hidden states with "
             f"lookahead={max(1, prefetch_lookahead_batches)} batch(es)"
