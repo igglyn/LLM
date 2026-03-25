@@ -149,6 +149,9 @@ def main() -> None:
             ademamix_t_beta3=cfg.train.ademamix_t_beta3,
             ademamix_slow_ema_reset_steps=cfg.train.ademamix_slow_ema_reset_steps,
             ademamix_use_foreach=cfg.train.ademamix_use_foreach,
+            ademamix_backend=cfg.train.ademamix_backend,
+            ademamix_state_backend=cfg.train.ademamix_state_backend,
+            ademamix_quant_block_size=cfg.train.ademamix_quant_block_size,
         )
         metrics = _train_loop_precomputed(
             model=pre_model,
@@ -207,6 +210,9 @@ def main() -> None:
             ademamix_t_beta3=cfg.train.ademamix_t_beta3,
             ademamix_slow_ema_reset_steps=cfg.train.ademamix_slow_ema_reset_steps,
             ademamix_use_foreach=cfg.train.ademamix_use_foreach,
+            ademamix_backend=cfg.train.ademamix_backend,
+            ademamix_state_backend=cfg.train.ademamix_state_backend,
+            ademamix_quant_block_size=cfg.train.ademamix_quant_block_size,
         )
 
         metrics = train_loop(
