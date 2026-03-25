@@ -414,15 +414,26 @@ class NNv5Block:
                 cnt_t.cpu().numpy().astype(np.uint64),
                 emit_out)
 
-    def forward_torch(self, tokens: np.ndarray, device: torch.device):
-        """Same as forward() but uses the given device explicitly."""
+    def forward_torch(self, tokens: np.ndarray | torch.Tensor, device: torch.device):
+        """Same as forward() but uses the given device explicitly.
+
+        tokens can be either:
+          - numpy uint64 array shaped (N, match_words), or
+          - torch int64 tensor already on device with identical bit layout.
+        """
         N  = tokens.shape[0]
         EW = self.emit_words
 
         if self.array_used == 0:
-            ti   = ~tokens
-            inp  = np.stack((tokens, ti), axis=1)
-            inp2, _ = np.unique(inp, axis=0, return_index=True)
+            if isinstance(tokens, torch.Tensor):
+                t_tok = tokens.to(device=device, dtype=torch.int64, non_blocking=True)
+                t_ti  = torch.bitwise_not(t_tok)
+                t_inp = torch.stack((t_tok, t_ti), dim=1)
+                inp2  = torch.unique(t_inp, dim=0).cpu().numpy().view(np.uint64)
+            else:
+                ti   = ~tokens
+                inp  = np.stack((tokens, ti), axis=1)
+                inp2, _ = np.unique(inp, axis=0, return_index=True)
             cp_empty = torch.zeros(N, 0, dtype=torch.int64, device=device)
             return (inp2,
                     np.zeros((inp2.shape[0], 2, EW), dtype=np.uint64),
@@ -431,7 +442,10 @@ class NNv5Block:
                     np.zeros(0, dtype=np.uint64),
                     np.zeros((N, 2, EW), dtype=np.uint64))
 
-        t_tok  = torch.from_numpy(tokens.view(np.int64)).to(device)
+        if isinstance(tokens, torch.Tensor):
+            t_tok = tokens.to(device=device, dtype=torch.int64, non_blocking=True)
+        else:
+            t_tok = torch.from_numpy(tokens.view(np.int64)).to(device)
         t_tinv = torch.bitwise_not(t_tok)
 
         choices_t, ep_t, en_t, ep_or_t, en_or_t, rev_t, cnt_t = _forward_all_shards(
