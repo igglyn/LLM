@@ -12,8 +12,6 @@ if str(SRC) not in sys.path:
 import argparse
 import math
 import re
-from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -201,97 +199,6 @@ def _evaluate_from_hidden(model: TinyPatchLM, val_loader: DataLoader, device: to
     return float(sum(losses) / max(1, len(losses)))
 
 
-@torch.no_grad()
-def _compute_hidden_on_cpu_patchers(model: TinyPatchLM, x_cpu: torch.Tensor, target_device: torch.device) -> torch.Tensor:
-    if x_cpu.device.type != "cpu":
-        x_cpu = x_cpu.cpu()
-
-    emb_device = model.token_emb.weight.device
-    patcher_device = next(model.patcher.parameters()).device
-
-    x_for_emb = x_cpu.to(emb_device, non_blocking=True)
-    h = model.token_emb(x_for_emb)
-    if model.token_pos_emb is not None:
-        pos = torch.arange(0, x_for_emb.shape[1], device=emb_device).unsqueeze(0)
-        h = h + model.token_pos_emb(pos)
-
-    h = h.to(patcher_device, non_blocking=True)
-    h, _ = model.patcher(h)
-    if model.patcher2 is not None:
-        h, _ = model.patcher2(h)
-    return h.to(target_device, non_blocking=True)
-
-
-def _make_online_patcher_prefetcher(
-    model: TinyPatchLM,
-    loader: DataLoader,
-    device: torch.device,
-    lookahead_batches: int,
-):
-    max_lookahead = 3
-    lookahead_batches = max(1, min(int(lookahead_batches), max_lookahead))
-    it = iter(loader)
-    executor = ThreadPoolExecutor(max_workers=1)
-    pending: deque[tuple[Future, torch.Tensor]] = deque()
-    exhausted = False
-
-    def _schedule_one() -> bool:
-        nonlocal exhausted
-        if exhausted:
-            return False
-        try:
-            x_cpu, y = next(it)
-        except StopIteration:
-            exhausted = True
-            return False
-        fut = executor.submit(_compute_hidden_on_cpu_patchers, model, x_cpu, device)
-        pending.append((fut, y))
-        return True
-
-    for _ in range(max(1, lookahead_batches)):
-        if not _schedule_one():
-            break
-
-    def _iterator():
-        try:
-            while pending:
-                fut, y = pending.popleft()
-                _schedule_one()
-                xh = fut.result()
-                yield xh, y
-                del xh
-                del y
-                del fut
-        finally:
-            executor.shutdown(wait=True, cancel_futures=False)
-
-    return _iterator()
-
-
-def _evaluate_online_patcher_prefetch(
-    model: TinyPatchLM,
-    val_loader: DataLoader,
-    device: torch.device,
-    max_batches: int | None = None,
-    lookahead_batches: int = 2,
-) -> float:
-    model.eval()
-    losses = []
-    with torch.no_grad():
-        for batch_idx, (xh, y) in enumerate(
-            _make_online_patcher_prefetcher(model, val_loader, device, lookahead_batches=lookahead_batches)
-        ):
-            if max_batches is not None and batch_idx >= max_batches:
-                break
-            xh = xh.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            _, loss = model.forward_from_hidden(xh, y)
-            losses.append(loss.item())
-    model.train()
-    return float(sum(losses) / max(1, len(losses)))
-
-
-
 def maybe_reduce_main_lr_by_thresholds(optimizer, val_loss: float, train_cfg: dict, reduction_state: dict) -> dict:
     thresholds = [
         ("lr_reduce_threshold", "lr_reduce_factor"),
@@ -357,11 +264,8 @@ def main():
 
     seq_len = _token_seq_len_from_cfg(cfg)
     patcher2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
-    # Online path — patchers run on CPU inline, no cache needed
+    # Online path — patchers run inline in model.forward, no cache needed
     use_cached_hidden = False
-    online_patcher_prefetch = bool(tcfg.get("online_patcher_prefetch", True)) and not use_cached_hidden
-    configured_prefetch_lookahead = int(tcfg.get("online_patcher_prefetch_lookahead_batches", 2))
-    prefetch_lookahead_batches = min(3, configured_prefetch_lookahead)
     token_dir = processed_dir
     if not (token_dir / "train_tokens.npy").exists():
         token_dir = Path(cfg["data"]["processed_dir_patcher"])
@@ -372,31 +276,10 @@ def main():
         seq_len=seq_len,
         batch_size=int(tcfg["batch_size"]),
     )
-    if online_patcher_prefetch:
-        if configured_prefetch_lookahead != prefetch_lookahead_batches:
-            print(
-                "Capped online patcher prefetch lookahead to 3 batches to avoid GPU buffer over-commit "
-                f"(configured={configured_prefetch_lookahead})"
-            )
-        print(
-            f"Online patcher prefetch mode — CPU patchers prepare hidden states with "
-            f"lookahead={max(1, prefetch_lookahead_batches)} batch(es)"
-        )
-    else:
-        print("Online patcher mode — patchers will run on CPU per batch")
+    print("Online patcher mode — patchers run directly in model.forward")
 
     model = _build_model_from_cfg(cfg, tokenizer, device)
     _maybe_load_pretrained_patcher(model, cfg, device)
-
-    # Move patchers to CPU to avoid GPU memory contention
-    if hasattr(model, 'patcher') and model.patcher is not None:
-        model.patcher = model.patcher.cpu()
-        print("Moved patcher1 to CPU")
-    if hasattr(model, 'patcher2') and model.patcher2 is not None:
-        model.patcher2 = model.patcher2.cpu()
-        print("Moved patcher2 to CPU")
-    if online_patcher_prefetch:
-        print("Keeping token embedding stack on model device to preserve tied LM head weights")
 
     if resume_ckpt is not None:
         model.load_state_dict(resume_ckpt["model"])
@@ -515,13 +398,7 @@ def main():
     # Dtype probe — log what the trunk actually receives on first batch
     _dtype_probed = False
     while step < max_steps:
-        if online_patcher_prefetch:
-            train_iter = _make_online_patcher_prefetcher(
-                model, train_loader, device, lookahead_batches=max(1, prefetch_lookahead_batches)
-            )
-        else:
-            train_iter = train_loader
-        for batch in train_iter:
+        for batch in train_loader:
             lr = warmup_cosine_lr(step, max_steps, warmup_steps, lr_max, lr_min) * float(lr_reduction_state.get("scale", 1.0))
             for group in optimizer.param_groups:
                 group["lr"] = lr
@@ -531,16 +408,6 @@ def main():
                 xh, y = xh.to(device), y.to(device)
                 if not _dtype_probed:
                     print(f"  dtype probe — cached hidden: {xh.dtype}  targets: {y.dtype}")
-                    _dtype_probed = True
-                with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
-                    _, loss = model.forward_from_hidden(xh, y)
-                    loss = loss / grad_accum_steps
-            elif online_patcher_prefetch:
-                xh, y = batch
-                xh = xh.to(device, non_blocking=True)
-                y = y.to(device, non_blocking=True)
-                if not _dtype_probed:
-                    print(f"  dtype probe — prefetched hidden: {xh.dtype}  targets: {y.dtype}")
                     _dtype_probed = True
                 with torch.cuda.amp.autocast(enabled=(device.type == "cuda" and amp_enabled), dtype=amp_dtype):
                     _, loss = model.forward_from_hidden(xh, y)
@@ -583,14 +450,6 @@ def main():
             if step % eval_every == 0 and step > 0:
                 if use_cached_hidden:
                     val_loss = _evaluate_from_hidden(model, val_loader, device, max_batches=eval_batches)
-                elif online_patcher_prefetch:
-                    val_loss = _evaluate_online_patcher_prefetch(
-                        model,
-                        val_loader,
-                        device,
-                        max_batches=eval_batches,
-                        lookahead_batches=max(1, prefetch_lookahead_batches),
-                    )
                 else:
                     val_loss = evaluate(model, val_loader, device, max_batches=eval_batches)
                 print(f"step={step} val_loss={val_loss:.4f}")

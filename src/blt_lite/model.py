@@ -533,17 +533,9 @@ class TinyPatchLM(nn.Module):
             if self.token_pos_emb is not None:
                 pos = torch.arange(0, token_t, device=x.device).unsqueeze(0)
                 h = h + self.token_pos_emb(pos)
-
-        # Patchers may be on CPU — move h to patcher device, run, move back
-        patcher_device = next(self.patcher.parameters()).device
-        with torch.no_grad():
-            h_p = h.to(patcher_device)
-            h_p, _ = self.patcher(h_p)
+            h, _ = self.patcher(h)
             if self.patcher2 is not None:
-                p2_device = next(self.patcher2.parameters()).device
-                h_p = h_p.to(p2_device)
-                h_p, _ = self.patcher2(h_p)
-            h = h_p.to(x.device)
+                h, _ = self.patcher2(h)
 
         return self.forward_from_hidden(h, targets)
 
