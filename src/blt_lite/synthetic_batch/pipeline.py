@@ -164,84 +164,44 @@ class SyntheticBatchHarness:
         # Append to buffer
         buf = np.concatenate([buf, packed_vecs], axis=0) if buf.shape[0] > 0 else packed_vecs.copy()
 
-        # Process buffer in forward_batch_size chunks.
-        # On CUDA, cap staged rows to at most 3 forward batches to limit peak VRAM.
-        max_gpu_rows = forward_batch_size * 3
+        # Process buffer in forward_batch_size chunks
         while buf.shape[0] >= forward_batch_size:
+            fwd_batch    = buf[:forward_batch_size]
+            buf          = buf[forward_batch_size:]
+            nnv2_active  = nnv5.emit_used > 0
+
+            # Forward on full batch — get all diffs at once
             if use_torch:
-                staged_rows = min(buf.shape[0], max_gpu_rows)
-                buf_t = torch.from_numpy(buf[:staged_rows].view(np.int64)).to(
-                    self.device, non_blocking=True
-                )
-                consumed_rows = 0
-                while consumed_rows + forward_batch_size <= staged_rows:
-                    fwd_batch_t = buf_t[consumed_rows:consumed_rows + forward_batch_size]
-                    consumed_rows += forward_batch_size
-                    nnv2_active = nnv5.emit_used > 0
-
-                    diff, emit, was_matched, _, _, _ = nnv5.forward_torch(fwd_batch_t, self.device)
-
-                    # Assign diffs in nnv5_chunk_size slices to control case growth
-                    n_diffs = diff.shape[0]
-                    for start in range(0, max(1, n_diffs), nnv5_chunk_size):
-                        end          = min(n_diffs, start + nnv5_chunk_size)
-                        d_chunk      = diff[start:end]
-                        e_chunk      = emit[start:end]
-                        m_chunk      = was_matched[start:end]
-                        cases_before = nnv5.array_used
-
-                        if nnv2_active:
-                            neg_case, new_cases, new_cases_emit, new_group_cases = \
-                                nnv5.assign_candidates(d_chunk, e_chunk, m_chunk)
-                            nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
-                        else:
-                            nnv5.assign(d_chunk, e_chunk, m_chunk)
-                            if nnv5.emit_used > 0:
-                                nnv2_active = True
-
-                        cases_after = nnv5.array_used
-                        if nnv5.emit_used > 0 and cases_after > cases_before:
-                            nnv2.compress_range(nnv5, cases_before, cases_after)
-                            nnv2.sync_to_nnv5(nnv5)
-
-                del buf_t
-                if consumed_rows == 0:
-                    break
-                buf = buf[consumed_rows:]
+                diff, emit, was_matched, _, _, _ = nnv5.forward_torch(fwd_batch, self.device)
             else:
-                fwd_batch = buf[:forward_batch_size]
-                buf       = buf[forward_batch_size:]
-                nnv2_active = nnv5.emit_used > 0
-
                 diff, emit, was_matched, _, _, _ = nnv5.forward(fwd_batch)
 
-                # Assign diffs in nnv5_chunk_size slices to control case growth
-                n_diffs = diff.shape[0]
-                for start in range(0, max(1, n_diffs), nnv5_chunk_size):
-                    end          = min(n_diffs, start + nnv5_chunk_size)
-                    d_chunk      = diff[start:end]
-                    e_chunk      = emit[start:end]
-                    m_chunk      = was_matched[start:end]
-                    cases_before = nnv5.array_used
+            # Assign diffs in nnv5_chunk_size slices to control case growth
+            n_diffs = diff.shape[0]
+            for start in range(0, max(1, n_diffs), nnv5_chunk_size):
+                end         = min(n_diffs, start + nnv5_chunk_size)
+                d_chunk     = diff[start:end]
+                e_chunk     = emit[start:end]
+                m_chunk     = was_matched[start:end]
+                cases_before = nnv5.array_used
 
-                    if nnv2_active:
-                        neg_case, new_cases, new_cases_emit, new_group_cases = \
-                            nnv5.assign_candidates(d_chunk, e_chunk, m_chunk)
-                        nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
-                    else:
-                        nnv5.assign(d_chunk, e_chunk, m_chunk)
-                        if nnv5.emit_used > 0:
-                            nnv2_active = True
+                if nnv2_active:
+                    neg_case, new_cases, new_cases_emit, new_group_cases = \
+                        nnv5.assign_candidates(d_chunk, e_chunk, m_chunk)
+                    nnv5.commit_candidates(neg_case, new_cases, new_cases_emit, new_group_cases)
+                else:
+                    nnv5.assign(d_chunk, e_chunk, m_chunk)
+                    if nnv5.emit_used > 0:
+                        nnv2_active = True
 
-                    cases_after = nnv5.array_used
-                    if nnv5.emit_used > 0 and cases_after > cases_before:
-                        nnv2.compress_range(nnv5, cases_before, cases_after)
-                        nnv2.sync_to_nnv5(nnv5)
+                cases_after = nnv5.array_used
+                if nnv5.emit_used > 0 and cases_after > cases_before:
+                    nnv2.compress_range(nnv5, cases_before, cases_after)
+                    nnv2.sync_to_nnv5(nnv5)
 
         # Emit extraction pass on current inputs only
         if use_torch:
-            packed_vecs_t = torch.from_numpy(packed_vecs.view(np.int64)).to(self.device, non_blocking=True)
-            _, _, _, choices_full, _, _ = nnv5.forward_torch(packed_vecs_t, self.device)
+            _, _, _, choices_full, _, _ = nnv5.forward_torch(packed_vecs, self.device)
         else:
             _, _, _, choices_full, _, _ = nnv5.forward(packed_vecs)
 
