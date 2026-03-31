@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.optim import AdamW
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +61,13 @@ def main() -> None:
         block_size=int(patcher_cfg.get("block_size", 8)),
     )
 
+    patcher_type = str(patcher_cfg.get("type", "transformer")).lower()
+    if patcher_type != "transformer":
+        raise ValueError(
+            "rewrite/train_patcher.py trains only transformer patchers. "
+            "Use rewrite/train_slot_conv_patcher.py for slot_conv."
+        )
+
     patcher = RewritePatcherAutoencoder(
         patch_size=int(patcher_cfg.get("patch_size", getattr(tokenizer, "patch_size", 1))),
         cfg=embedded_cfg,
@@ -80,7 +86,7 @@ def main() -> None:
             x = batch.to(device)
             token_hidden = emb(x)
             recon_hidden, _ = patcher(token_hidden)
-            loss = F.mse_loss(recon_hidden, token_hidden)
+            loss = torch.nn.functional.mse_loss(recon_hidden, token_hidden)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
