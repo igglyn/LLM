@@ -3,18 +3,30 @@
 Key behavior:
 - preprocessing tokenizes each source text file independently,
   writing one `.npy` token file per source;
-- training windows are fixed to first-patcher patch length (`patcher.patch_size`),
+- training windows are fixed by patch geometry (`patch_size * patch_count`),
   so no separate seq_len argument is required.
+
+This module can be called from project root as a script:
+    python rewrite/dataloader.py --config configs/tiny.yaml
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from blt_lite.tokenizer import FixedPatchTokenizer
 
@@ -123,3 +135,23 @@ def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: in
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
     return train_dl, val_dl, tokenizer_path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Rewrite first-patcher preprocessing + dataloader smoke entrypoint")
+    parser.add_argument("--config", required=True, help="Path to config YAML from project root")
+    args = parser.parse_args()
+
+    from blt_lite.utils import load_config
+    cfg = load_config(args.config)
+    output_root = Path(cfg["data"].get("processed_dir_patcher", cfg["data"]["processed_dir"])) / "rewrite_sources"
+    batch_size = int(cfg.get("patcher_train", {}).get("batch_size", cfg.get("train", {}).get("batch_size", 8)))
+
+    train_dl, val_dl, tokenizer_path = build_first_patcher_dataloaders(cfg, output_root=output_root, batch_size=batch_size)
+    print(f"Prepared rewrite dataloader assets under: {output_root}")
+    print(f"Tokenizer: {tokenizer_path}")
+    print(f"Train batches: {len(train_dl)} | Val batches: {len(val_dl)}")
+
+
+if __name__ == "__main__":
+    main()

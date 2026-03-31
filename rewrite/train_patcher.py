@@ -17,11 +17,12 @@ from torch.optim import AdamW
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from blt_lite.tokenizer import FixedPatchTokenizer
-from blt_lite.utils import get_device, load_config, set_seed
 from rewrite.dataloader import build_first_patcher_dataloaders
 from rewrite.patcher_models import EmbeddedPatcherConfig, RewritePatcherAutoencoder
 
@@ -31,6 +32,7 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to config YAML (same style as scripts/train_patcher.py)")
     args = parser.parse_args()
 
+    from blt_lite.utils import get_device, load_config, set_seed
     cfg = load_config(args.config)
     set_seed(int(cfg.get("train", {}).get("seed", 42)))
     device = get_device()
