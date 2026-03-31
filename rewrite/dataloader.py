@@ -66,6 +66,39 @@ class SourcePatchDataset(Dataset):
         return torch.from_numpy(np.asarray(x, dtype=np.int64))
 
 
+class SourceCausalDataset(Dataset):
+    """Causal next-token windows from per-source token files."""
+
+    def __init__(self, token_files: list[Path], seq_len: int):
+        if seq_len <= 0:
+            raise ValueError("seq_len must be > 0")
+        if not token_files:
+            raise ValueError("token_files must not be empty")
+        self.seq_len = seq_len
+        self.tokens_per_file = [np.load(path, mmap_mode="r") for path in token_files]
+        self.index: list[tuple[int, int]] = []
+
+        for file_idx, arr in enumerate(self.tokens_per_file):
+            # Need x[idx:idx+seq_len] and y[idx+1:idx+seq_len+1].
+            if len(arr) <= seq_len:
+                continue
+            for start in range(0, len(arr) - seq_len - 1):
+                self.index.append((file_idx, start))
+
+        if not self.index:
+            raise ValueError("No valid causal windows found for the requested sequence length")
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        file_idx, start = self.index[idx]
+        arr = self.tokens_per_file[file_idx]
+        x = np.asarray(arr[start : start + self.seq_len], dtype=np.int64)
+        y = np.asarray(arr[start + 1 : start + self.seq_len + 1], dtype=np.int64)
+        return torch.from_numpy(x), torch.from_numpy(y)
+
+
 class SourceMetaPatchDataset(Dataset):
     """Samples windows of explicit first-layer patches for second patcher training.
 
@@ -155,6 +188,8 @@ def preprocess_sources(cfg: dict, output_root: Path) -> tuple[Path, Path, Path]:
     raw_root = Path(data_cfg["raw_path"])
     pattern = data_cfg.get("pattern", "*.txt")
     split = float(data_cfg.get("train_split", 0.95))
+    if not (0.0 < split < 1.0):
+        raise ValueError(f"data.train_split must be in (0, 1), got {split}")
 
     source_paths = sorted(raw_root.glob(pattern))
     if not source_paths:
@@ -245,12 +280,28 @@ def export_second_patcher_windows(
     return exported_files
 
 
-def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: int) -> tuple[DataLoader, DataLoader, Path]:
-    """Build dataloaders for first patcher only (window by patch count)."""
+def _resolve_seq_len_tokens(cfg: dict) -> int:
+    patcher_cfg = cfg.get("patcher", {})
+    model_cfg = cfg.get("model", {})
+
+    seq_len_tokens = int(patcher_cfg.get("seq_len_tokens", model_cfg.get("seq_len", 1)))
+    if seq_len_tokens <= 0:
+        raise ValueError(f"Resolved seq_len_tokens must be > 0, got {seq_len_tokens}")
+    return seq_len_tokens
+
+
+def build_rewrite_dataloaders(cfg: dict, output_root: Path, batch_size: int) -> tuple[dict[str, DataLoader], Path]:
+    """Build rewrite patcher + main-model dataloaders with config validation."""
 
     patch_size = int(cfg.get("patcher", {}).get("patch_size", 1))
     patch_count = int(cfg.get("patcher_train", {}).get("window_patches", cfg.get("model", {}).get("seq_len", 1)))
     seq_len_tokens = _resolve_seq_len_tokens(cfg)
+    if seq_len_tokens % patch_size != 0:
+        raise ValueError(
+            "patcher.seq_len_tokens must be divisible by patcher.patch_size "
+            f"(got seq_len_tokens={seq_len_tokens}, patch_size={patch_size})"
+        )
+
     train_dir, val_dir, tokenizer_path = preprocess_sources(cfg, output_root=output_root)
 
     train_files = sorted(train_dir.glob("*.npy"))
