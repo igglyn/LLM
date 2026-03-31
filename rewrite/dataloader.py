@@ -64,6 +64,59 @@ class SourcePatchDataset(Dataset):
         return torch.from_numpy(np.asarray(x, dtype=np.int64))
 
 
+class SourceMetaPatchDataset(Dataset):
+    """Samples windows of explicit first-layer patches for second patcher training.
+
+    Each item is shaped `(patches_per_window, patch_size)`, where each row is one
+    concrete first-layer patch extracted from source tokens. This avoids deriving
+    stage-2 targets from a raw token-length product and keeps patch extraction as an
+    explicit step (important for future whitespace-aware padding rules).
+    """
+
+    def __init__(
+        self,
+        token_files: list[Path],
+        patch_size: int,
+        meta_patch_size: int,
+        window_meta_patches: int,
+    ):
+        if patch_size <= 0:
+            raise ValueError("patch_size must be > 0")
+        if meta_patch_size <= 0:
+            raise ValueError("meta_patch_size must be > 0")
+        if window_meta_patches <= 0:
+            raise ValueError("window_meta_patches must be > 0")
+
+        self.patch_size = patch_size
+        self.meta_patch_size = meta_patch_size
+        self.window_meta_patches = window_meta_patches
+        self.patches_per_window = meta_patch_size * window_meta_patches
+        self.tokens_per_file = [np.load(path, mmap_mode="r") for path in token_files]
+        self.index: list[tuple[int, int]] = []
+
+        for file_idx, arr in enumerate(self.tokens_per_file):
+            available_patch_count = len(arr) // self.patch_size
+            if available_patch_count < self.patches_per_window:
+                continue
+            for patch_start in range(0, available_patch_count - self.patches_per_window + 1, self.patches_per_window):
+                self.index.append((file_idx, patch_start))
+
+        if not self.index:
+            raise ValueError("No valid patch windows found for second patcher training")
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        file_idx, patch_start = self.index[idx]
+        arr = self.tokens_per_file[file_idx]
+        token_start = patch_start * self.patch_size
+        token_end = token_start + (self.patches_per_window * self.patch_size)
+        tokens = np.asarray(arr[token_start:token_end], dtype=np.int64)
+        patches = tokens.reshape(self.patches_per_window, self.patch_size)
+        return torch.from_numpy(patches)
+
+
 def preprocess_sources(cfg: dict, output_root: Path) -> tuple[Path, Path, Path]:
     """Tokenize each raw source into its own file for train/val splits."""
 
@@ -131,6 +184,52 @@ def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: in
 
     train_ds = SourcePatchDataset(train_files, patch_size=patch_size, patch_count=patch_count)
     val_ds = SourcePatchDataset(val_files, patch_size=patch_size, patch_count=patch_count)
+
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
+    return train_dl, val_dl, tokenizer_path
+
+
+def build_second_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: int) -> tuple[DataLoader, DataLoader, Path]:
+    """Build dataloaders for second patcher windows expressed in first-layer patches.
+
+    The second patcher combines first-layer patches into meta-patches. This loader
+    explicitly materializes first-layer patch windows per sample:
+    `(meta_patch_size * window_meta_patches, patch_size)`.
+    """
+
+    patcher_cfg = cfg.get("patcher", {})
+    patcher2_cfg = cfg.get("patcher2", {})
+    patcher_train = cfg.get("patcher_train", {})
+    patcher2_train = cfg.get("patcher2_train", {})
+    model_cfg = cfg.get("model", {})
+
+    patch_size = int(patcher_cfg.get("patch_size", 1))
+    meta_patch_size = int(patcher2_cfg.get("patch_size", 2))
+    window_meta_patches = int(
+        patcher2_train.get(
+            "window_meta_patches",
+            patcher_train.get("window_patches", model_cfg.get("seq_len", 1)),
+        )
+    )
+    train_dir, val_dir, tokenizer_path = preprocess_sources(cfg, output_root=output_root)
+    train_files = sorted(train_dir.glob("*.npy"))
+    val_files = sorted(val_dir.glob("*.npy"))
+    if not train_files or not val_files:
+        raise RuntimeError("Preprocess step produced no train/val source files")
+
+    train_ds = SourceMetaPatchDataset(
+        train_files,
+        patch_size=patch_size,
+        meta_patch_size=meta_patch_size,
+        window_meta_patches=window_meta_patches,
+    )
+    val_ds = SourceMetaPatchDataset(
+        val_files,
+        patch_size=patch_size,
+        meta_patch_size=meta_patch_size,
+        window_meta_patches=window_meta_patches,
+    )
 
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
