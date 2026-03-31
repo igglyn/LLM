@@ -59,8 +59,68 @@ def _seq_len_from_cfg(cfg: dict) -> int:
     p1 = int(cfg.get("patcher", {}).get("patch_size", 1))
     p2_enabled = bool(cfg.get("patcher2", {}).get("enabled", True))
     p2 = int(cfg.get("patcher2", {}).get("patch_size", 2)) if p2_enabled else 1
-    default_seq_len = int(model_cfg["seq_len"]) * p1 * p2
-    return int(cfg.get("patcher2_train", {}).get("seq_len_tokens", default_seq_len))
+    return int(model_cfg["seq_len"]) * p1 * p2
+
+
+def _validate_known_keys(section_name: str, section_cfg: dict, allowed_keys: set[str]) -> None:
+    unknown = sorted(k for k in section_cfg if k not in allowed_keys)
+    if not unknown:
+        return
+
+    messages = []
+    for key in unknown:
+        suggestion = difflib.get_close_matches(key, sorted(allowed_keys), n=1)
+        hint = f" (did you mean '{suggestion[0]}'?)" if suggestion else ""
+        messages.append(f"{section_name}.{key}{hint}")
+    raise ValueError(
+        "Unknown config key(s) detected for slot-conv training: "
+        + ", ".join(messages)
+    )
+
+
+def _resolve_slot_conv_dims(patcher_cfg: dict, d_model: int) -> tuple[int, int]:
+    groups = patcher_cfg.get("groups", patcher_cfg.get("group_count", patcher_cfg.get("num_groups")))
+    d_chunk = patcher_cfg.get("d_chunk", patcher_cfg.get("chunk_dim", patcher_cfg.get("group_width")))
+
+    if groups is None and d_chunk is None:
+        raise ValueError(
+            "slot_conv requires patcher2.groups and patcher2.d_chunk (or aliases group_count/chunk_dim)."
+        )
+    if groups is None:
+        d_chunk = int(d_chunk)
+        if d_chunk <= 0 or d_model % d_chunk != 0:
+            raise ValueError(f"Cannot infer groups: d_model={d_model} must be divisible by d_chunk={d_chunk}")
+        groups = d_model // d_chunk
+    if d_chunk is None:
+        groups = int(groups)
+        if groups <= 0 or d_model % groups != 0:
+            raise ValueError(f"Cannot infer d_chunk: d_model={d_model} must be divisible by groups={groups}")
+        d_chunk = d_model // groups
+
+    groups = int(groups)
+    d_chunk = int(d_chunk)
+    if groups * d_chunk != d_model:
+        raise ValueError(f"slot_conv expects groups*d_chunk == d_model, got {groups}*{d_chunk} != {d_model}")
+    return groups, d_chunk
+
+
+def _maybe_prepare_stage1_cache(cfg_path: str) -> None:
+    cmd = [sys.executable, "scripts/prepare_data_patcher2.py", "--config", cfg_path]
+    print(f"Stage1 hidden cache missing; running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+def _warn_deprecated_seq_len_tokens(patcher_cfg: dict, train_cfg: dict) -> None:
+    if "seq_len_tokens" in patcher_cfg:
+        print(
+            "Warning: patcher2.seq_len_tokens is deprecated for slot-conv rewrite training and is ignored. "
+            "Sequence length is derived from model.seq_len * patcher.patch_size * patcher2.patch_size."
+        )
+    if "seq_len_tokens" in train_cfg:
+        print(
+            "Warning: patcher2_train.seq_len_tokens is deprecated for slot-conv rewrite training and is ignored. "
+            "Sequence length is derived from model.seq_len * patcher.patch_size * patcher2.patch_size."
+        )
 
 
 def _validate_known_keys(section_name: str, section_cfg: dict, allowed_keys: set[str]) -> None:
@@ -143,6 +203,7 @@ def main() -> None:
             "enabled",
             "type",
             "patch_size",
+            "seq_len_tokens",
             "latent_dim",
             "pos_encoding",
             "encoder_layers",
@@ -170,6 +231,7 @@ def main() -> None:
         train_cfg,
         {"batch_size", "max_steps", "log_every", "lr", "seq_len_tokens"},
     )
+    _warn_deprecated_seq_len_tokens(patcher_cfg, train_cfg)
 
     patcher_type = str(patcher_cfg.get("type", "slot_conv")).lower()
     if patcher_type != "slot_conv":
