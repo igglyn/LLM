@@ -123,6 +123,54 @@ def _warn_deprecated_seq_len_tokens(patcher_cfg: dict, train_cfg: dict) -> None:
         )
 
 
+def _validate_known_keys(section_name: str, section_cfg: dict, allowed_keys: set[str]) -> None:
+    unknown = sorted(k for k in section_cfg if k not in allowed_keys)
+    if not unknown:
+        return
+
+    messages = []
+    for key in unknown:
+        suggestion = difflib.get_close_matches(key, sorted(allowed_keys), n=1)
+        hint = f" (did you mean '{suggestion[0]}'?)" if suggestion else ""
+        messages.append(f"{section_name}.{key}{hint}")
+    raise ValueError(
+        "Unknown config key(s) detected for slot-conv training: "
+        + ", ".join(messages)
+    )
+
+
+def _resolve_slot_conv_dims(patcher_cfg: dict, d_model: int) -> tuple[int, int]:
+    groups = patcher_cfg.get("groups", patcher_cfg.get("group_count", patcher_cfg.get("num_groups")))
+    d_chunk = patcher_cfg.get("d_chunk", patcher_cfg.get("chunk_dim", patcher_cfg.get("group_width")))
+
+    if groups is None and d_chunk is None:
+        raise ValueError(
+            "slot_conv requires patcher2.groups and patcher2.d_chunk (or aliases group_count/chunk_dim)."
+        )
+    if groups is None:
+        d_chunk = int(d_chunk)
+        if d_chunk <= 0 or d_model % d_chunk != 0:
+            raise ValueError(f"Cannot infer groups: d_model={d_model} must be divisible by d_chunk={d_chunk}")
+        groups = d_model // d_chunk
+    if d_chunk is None:
+        groups = int(groups)
+        if groups <= 0 or d_model % groups != 0:
+            raise ValueError(f"Cannot infer d_chunk: d_model={d_model} must be divisible by groups={groups}")
+        d_chunk = d_model // groups
+
+    groups = int(groups)
+    d_chunk = int(d_chunk)
+    if groups * d_chunk != d_model:
+        raise ValueError(f"slot_conv expects groups*d_chunk == d_model, got {groups}*{d_chunk} != {d_model}")
+    return groups, d_chunk
+
+
+def _maybe_prepare_stage1_cache(cfg_path: str) -> None:
+    cmd = [sys.executable, "scripts/prepare_data_patcher2.py", "--config", cfg_path]
+    print(f"Stage1 hidden cache missing; running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rewrite slot-conv patcher")
     parser.add_argument("--config", required=True, help="Path to config YAML")
