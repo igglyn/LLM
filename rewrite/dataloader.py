@@ -117,6 +117,34 @@ class SourceMetaPatchDataset(Dataset):
         return torch.from_numpy(patches)
 
 
+class ExportedMetaPatchDataset(Dataset):
+    """Reads exported patcher2 windows from `.npy` files."""
+
+    def __init__(self, window_files: list[Path]):
+        self.window_files = window_files
+        self.windows_per_file = [np.load(path, mmap_mode="r") for path in window_files]
+        self.index: list[tuple[int, int]] = []
+
+        for file_idx, arr in enumerate(self.windows_per_file):
+            if arr.ndim != 3:
+                raise ValueError(
+                    f"Expected 3D exported patcher2 windows in {window_files[file_idx]}, got shape={arr.shape}"
+                )
+            for row_idx in range(arr.shape[0]):
+                self.index.append((file_idx, row_idx))
+
+        if not self.index:
+            raise ValueError("No exported patcher2 windows found")
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        file_idx, row_idx = self.index[idx]
+        sample = np.asarray(self.windows_per_file[file_idx][row_idx], dtype=np.int64)
+        return torch.from_numpy(sample)
+
+
 def preprocess_sources(cfg: dict, output_root: Path) -> tuple[Path, Path, Path]:
     """Tokenize each raw source into its own file for train/val splits."""
 
@@ -170,6 +198,51 @@ def preprocess_sources(cfg: dict, output_root: Path) -> tuple[Path, Path, Path]:
     return train_dir, val_dir, tokenizer_path
 
 
+def export_second_patcher_windows(
+    source_dir: Path,
+    export_dir: Path,
+    patch_size: int,
+    meta_patch_size: int,
+    window_meta_patches: int,
+) -> list[Path]:
+    """Export second-patcher train/val files from tokenized per-source files.
+
+    Each exported file is shaped:
+    `(num_windows, meta_patch_size * window_meta_patches, patch_size)`.
+    """
+
+    if patch_size <= 0:
+        raise ValueError("patch_size must be > 0")
+    if meta_patch_size <= 0:
+        raise ValueError("meta_patch_size must be > 0")
+    if window_meta_patches <= 0:
+        raise ValueError("window_meta_patches must be > 0")
+
+    patches_per_window = meta_patch_size * window_meta_patches
+    token_files = sorted(source_dir.glob("*.npy"))
+    export_dir.mkdir(parents=True, exist_ok=True)
+    exported_files: list[Path] = []
+
+    for token_file in token_files:
+        arr = np.load(token_file, mmap_mode="r")
+        available_patch_count = len(arr) // patch_size
+        if available_patch_count < patches_per_window:
+            continue
+
+        window_count = (available_patch_count - patches_per_window) // patches_per_window + 1
+        windows = np.empty((window_count, patches_per_window, patch_size), dtype=np.int32)
+        for i, patch_start in enumerate(range(0, available_patch_count - patches_per_window + 1, patches_per_window)):
+            token_start = patch_start * patch_size
+            token_end = token_start + (patches_per_window * patch_size)
+            windows[i] = np.asarray(arr[token_start:token_end], dtype=np.int32).reshape(patches_per_window, patch_size)
+
+        out_file = export_dir / token_file.name
+        np.save(out_file, windows)
+        exported_files.append(out_file)
+
+    return exported_files
+
+
 def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: int) -> tuple[DataLoader, DataLoader, Path]:
     """Build dataloaders for first patcher only (window by patch count)."""
 
@@ -213,23 +286,27 @@ def build_second_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: i
         )
     )
     train_dir, val_dir, tokenizer_path = preprocess_sources(cfg, output_root=output_root)
-    train_files = sorted(train_dir.glob("*.npy"))
-    val_files = sorted(val_dir.glob("*.npy"))
+    patcher2_train_dir = output_root / "patcher2_train"
+    patcher2_val_dir = output_root / "patcher2_val"
+    train_files = export_second_patcher_windows(
+        source_dir=train_dir,
+        export_dir=patcher2_train_dir,
+        patch_size=patch_size,
+        meta_patch_size=meta_patch_size,
+        window_meta_patches=window_meta_patches,
+    )
+    val_files = export_second_patcher_windows(
+        source_dir=val_dir,
+        export_dir=patcher2_val_dir,
+        patch_size=patch_size,
+        meta_patch_size=meta_patch_size,
+        window_meta_patches=window_meta_patches,
+    )
     if not train_files or not val_files:
-        raise RuntimeError("Preprocess step produced no train/val source files")
+        raise RuntimeError("Second patcher export step produced no train/val files")
 
-    train_ds = SourceMetaPatchDataset(
-        train_files,
-        patch_size=patch_size,
-        meta_patch_size=meta_patch_size,
-        window_meta_patches=window_meta_patches,
-    )
-    val_ds = SourceMetaPatchDataset(
-        val_files,
-        patch_size=patch_size,
-        meta_patch_size=meta_patch_size,
-        window_meta_patches=window_meta_patches,
-    )
+    train_ds = ExportedMetaPatchDataset(train_files)
+    val_ds = ExportedMetaPatchDataset(val_files)
 
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
