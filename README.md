@@ -131,6 +131,24 @@ python scripts/train_patcher2.py --config configs/tiny.yaml
 Trains on the cached hidden states from step 4.
 Outputs checkpoints to `outputs/patcher2/`.
 
+#### Slot-conv patcher2 (rewrite path)
+
+If `patcher2.type: slot_conv`, use:
+
+```bash
+python rewrite/train_slot_conv_patcher.py --config configs/tiny.yaml --print-effective-config
+```
+
+Optional wiring guard:
+
+```bash
+python rewrite/train_slot_conv_patcher.py --config configs/tiny.yaml --prepare-data-if-missing
+```
+
+`rewrite/train_slot_conv_patcher.py` validates unknown config keys (with typo hints),
+accepts `groups`/`d_chunk` (or aliases `group_count`/`chunk_dim`), and can auto-run
+`scripts/prepare_data_patcher2.py` when stage1 cache files are missing.
+
 ### 6. Train trunk
 
 Set checkpoint paths in `tiny.yaml`:

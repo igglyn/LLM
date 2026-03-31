@@ -10,6 +10,8 @@ For now this entrypoint is keyed off second-patcher config blocks
 from __future__ import annotations
 
 import argparse
+import difflib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,9 +63,67 @@ def _seq_len_from_cfg(cfg: dict) -> int:
     return int(cfg.get("patcher2_train", {}).get("seq_len_tokens", default_seq_len))
 
 
+def _validate_known_keys(section_name: str, section_cfg: dict, allowed_keys: set[str]) -> None:
+    unknown = sorted(k for k in section_cfg if k not in allowed_keys)
+    if not unknown:
+        return
+
+    messages = []
+    for key in unknown:
+        suggestion = difflib.get_close_matches(key, sorted(allowed_keys), n=1)
+        hint = f" (did you mean '{suggestion[0]}'?)" if suggestion else ""
+        messages.append(f"{section_name}.{key}{hint}")
+    raise ValueError(
+        "Unknown config key(s) detected for slot-conv training: "
+        + ", ".join(messages)
+    )
+
+
+def _resolve_slot_conv_dims(patcher_cfg: dict, d_model: int) -> tuple[int, int]:
+    groups = patcher_cfg.get("groups", patcher_cfg.get("group_count", patcher_cfg.get("num_groups")))
+    d_chunk = patcher_cfg.get("d_chunk", patcher_cfg.get("chunk_dim", patcher_cfg.get("group_width")))
+
+    if groups is None and d_chunk is None:
+        raise ValueError(
+            "slot_conv requires patcher2.groups and patcher2.d_chunk (or aliases group_count/chunk_dim)."
+        )
+    if groups is None:
+        d_chunk = int(d_chunk)
+        if d_chunk <= 0 or d_model % d_chunk != 0:
+            raise ValueError(f"Cannot infer groups: d_model={d_model} must be divisible by d_chunk={d_chunk}")
+        groups = d_model // d_chunk
+    if d_chunk is None:
+        groups = int(groups)
+        if groups <= 0 or d_model % groups != 0:
+            raise ValueError(f"Cannot infer d_chunk: d_model={d_model} must be divisible by groups={groups}")
+        d_chunk = d_model // groups
+
+    groups = int(groups)
+    d_chunk = int(d_chunk)
+    if groups * d_chunk != d_model:
+        raise ValueError(f"slot_conv expects groups*d_chunk == d_model, got {groups}*{d_chunk} != {d_model}")
+    return groups, d_chunk
+
+
+def _maybe_prepare_stage1_cache(cfg_path: str) -> None:
+    cmd = [sys.executable, "scripts/prepare_data_patcher2.py", "--config", cfg_path]
+    print(f"Stage1 hidden cache missing; running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train rewrite slot-conv patcher")
     parser.add_argument("--config", required=True, help="Path to config YAML")
+    parser.add_argument(
+        "--prepare-data-if-missing",
+        action="store_true",
+        help="If train_stage1_hidden.npy is missing, run scripts/prepare_data_patcher2.py automatically.",
+    )
+    parser.add_argument(
+        "--print-effective-config",
+        action="store_true",
+        help="Print resolved slot-conv wiring (groups/chunk/seq_len) before training.",
+    )
     args = parser.parse_args()
 
     from blt_lite.utils import get_device, load_config, set_seed
@@ -76,23 +136,58 @@ def main() -> None:
     patcher_cfg = cfg.get("patcher2", {})
     train_cfg = cfg.get("patcher2_train", {})
 
+    _validate_known_keys(
+        "patcher2",
+        patcher_cfg,
+        {
+            "enabled",
+            "type",
+            "patch_size",
+            "latent_dim",
+            "pos_encoding",
+            "encoder_layers",
+            "decoder_layers",
+            "n_heads",
+            "dropout",
+            "grad_checkpointing",
+            "flash_attention",
+            "block_attention",
+            "block_size",
+            "pretrained_path",
+            "groups",
+            "d_chunk",
+            "kernel_size",
+            "hidden_mult",
+            "use_residual",
+            "group_count",
+            "num_groups",
+            "chunk_dim",
+            "group_width",
+        },
+    )
+    _validate_known_keys(
+        "patcher2_train",
+        train_cfg,
+        {"batch_size", "max_steps", "log_every", "lr", "seq_len_tokens"},
+    )
+
     patcher_type = str(patcher_cfg.get("type", "slot_conv")).lower()
     if patcher_type != "slot_conv":
         raise ValueError("rewrite/train_slot_conv_patcher.py requires patcher2.type=slot_conv")
 
-    groups = int(patcher_cfg["groups"])
-    d_chunk = int(patcher_cfg["d_chunk"])
     d_model = int(model_cfg["d_model"])
-    if groups * d_chunk != d_model:
-        raise ValueError(f"slot_conv expects groups*d_chunk == d_model, got {groups}*{d_chunk} != {d_model}")
+    groups, d_chunk = _resolve_slot_conv_dims(patcher_cfg, d_model)
 
     processed_root = Path(cfg["data"]["processed_dir_patcher2"])
     train_hidden_path = processed_root / "train_stage1_hidden.npy"
     if not train_hidden_path.exists():
-        raise FileNotFoundError(
-            f"Missing patcher2 hidden cache: {train_hidden_path}. "
-            "Run scripts/prepare_data_patcher2.py first."
-        )
+        if args.prepare_data_if_missing:
+            _maybe_prepare_stage1_cache(args.config)
+        if not train_hidden_path.exists():
+            raise FileNotFoundError(
+                f"Missing patcher2 hidden cache: {train_hidden_path}. "
+                "Run scripts/prepare_data_patcher2.py first."
+            )
 
     hidden = np.load(train_hidden_path)
     if hidden.shape[1] != d_model:
@@ -100,6 +195,12 @@ def main() -> None:
     seq_len = _seq_len_from_cfg(cfg)
     batch_size = int(train_cfg.get("batch_size", cfg.get("train", {}).get("batch_size", 8)))
     train_loader = DataLoader(HiddenSequenceDataset(hidden, seq_len), batch_size=batch_size, shuffle=True, drop_last=True)
+    if args.print_effective_config:
+        print(
+            "slot_conv_wiring "
+            f"type=slot_conv d_model={d_model} groups={groups} d_chunk={d_chunk} "
+            f"seq_len_tokens={seq_len} hidden_cache={train_hidden_path}"
+        )
 
     patcher = SlotConvAutoencoder(
         groups=groups,
