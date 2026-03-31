@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from blt_lite.tokenizer import FixedPatchTokenizer
+from blt_lite.utils import ensure_dir
 from rewrite.dataloader import build_first_patcher_dataloaders
 from rewrite.patcher_models import EmbeddedPatcherConfig, RewritePatcherAutoencoder
 
@@ -70,10 +71,31 @@ def main() -> None:
     optimizer = AdamW(list(emb.parameters()) + list(patcher.parameters()), lr=float(train_cfg.get("lr", 3e-4)))
     max_steps = int(train_cfg.get("max_steps", 100))
     log_every = int(train_cfg.get("log_every", 10))
+    eval_every = int(train_cfg.get("eval_every", 100))
+    eval_batches = int(train_cfg.get("eval_batches", 50))
+    save_every = int(train_cfg.get("save_every", 200))
+    out_dir = ensure_dir(train_cfg.get("out_dir", "outputs/rewrite_patcher"))
 
     patcher.train()
     emb.train()
     step = 0
+    best_val = float("inf")
+
+    @torch.no_grad()
+    def val_loss() -> float:
+        patcher.eval()
+        emb.eval()
+        losses: list[float] = []
+        for i, batch in enumerate(train_loader):
+            if i >= eval_batches:
+                break
+            x = batch.to(device)
+            token_hidden = emb(x)
+            recon_hidden, _ = patcher(token_hidden)
+            losses.append(float(F.mse_loss(recon_hidden, token_hidden).item()))
+        patcher.train()
+        emb.train()
+        return float(sum(losses) / max(1, len(losses)))
 
     while step < max_steps:
         for batch in train_loader:
@@ -90,8 +112,30 @@ def main() -> None:
             if step % log_every == 0 or step == 1:
                 print(f"rewrite_patcher_step={step} loss={loss.item():.8f}")
 
+            if step % eval_every == 0 and step > 0:
+                current_val = val_loss()
+                print(f"rewrite_patcher_step={step} val_loss={current_val:.8f}")
+                if current_val < best_val:
+                    best_val = current_val
+                    torch.save(
+                        {"patcher": patcher.state_dict(), "token_emb": emb.state_dict(), "config": cfg},
+                        out_dir / "best.pt",
+                    )
+
+            if step % save_every == 0 and step > 0:
+                torch.save(
+                    {"patcher": patcher.state_dict(), "token_emb": emb.state_dict(), "config": cfg},
+                    out_dir / f"step_{step}.pt",
+                )
+
             if step >= max_steps:
                 break
+
+    torch.save(
+        {"patcher": patcher.state_dict(), "token_emb": emb.state_dict(), "config": cfg},
+        out_dir / "last.pt",
+    )
+    print(f"Rewrite patcher pretraining complete. Outputs in {out_dir}")
 
 
 if __name__ == "__main__":
