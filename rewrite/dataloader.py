@@ -1,10 +1,12 @@
-"""Rewrite dataloader focused on first patcher training.
+"""Rewrite dataloader for patcher + main-model rewrite layers.
 
 Key behavior:
 - preprocessing tokenizes each source text file independently,
   writing one `.npy` token file per source;
 - training windows are fixed by patch geometry (`patch_size * patch_count`),
   so no separate seq_len argument is required.
+- supports both patcher reconstruction windows and causal token windows
+  from the same preprocessed source files.
 
 This module can be called from project root as a script:
     python rewrite/dataloader.py --config configs/tiny.yaml
@@ -248,6 +250,7 @@ def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: in
 
     patch_size = int(cfg.get("patcher", {}).get("patch_size", 1))
     patch_count = int(cfg.get("patcher_train", {}).get("window_patches", cfg.get("model", {}).get("seq_len", 1)))
+    seq_len_tokens = _resolve_seq_len_tokens(cfg)
     train_dir, val_dir, tokenizer_path = preprocess_sources(cfg, output_root=output_root)
 
     train_files = sorted(train_dir.glob("*.npy"))
@@ -257,10 +260,22 @@ def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: in
 
     train_ds = SourcePatchDataset(train_files, patch_size=patch_size, patch_count=patch_count)
     val_ds = SourcePatchDataset(val_files, patch_size=patch_size, patch_count=patch_count)
+    train_main_ds = SourceCausalDataset(train_files, seq_len=seq_len_tokens)
+    val_main_ds = SourceCausalDataset(val_files, seq_len=seq_len_tokens)
 
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
-    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
-    return train_dl, val_dl, tokenizer_path
+    loaders = {
+        "patcher_train": DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True),
+        "patcher_val": DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False),
+        "main_train": DataLoader(train_main_ds, batch_size=batch_size, shuffle=True, drop_last=True),
+        "main_val": DataLoader(val_main_ds, batch_size=batch_size, shuffle=False, drop_last=False),
+    }
+    return loaders, tokenizer_path
+
+
+def build_first_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: int) -> tuple[DataLoader, DataLoader, Path]:
+    """Backward-compatible patcher-only dataloader builder."""
+    loaders, tokenizer_path = build_rewrite_dataloaders(cfg, output_root=output_root, batch_size=batch_size)
+    return loaders["patcher_train"], loaders["patcher_val"], tokenizer_path
 
 
 def build_second_patcher_dataloaders(cfg: dict, output_root: Path, batch_size: int) -> tuple[DataLoader, DataLoader, Path]:
@@ -323,10 +338,15 @@ def main() -> None:
     output_root = Path(cfg["data"].get("processed_dir_patcher", cfg["data"]["processed_dir"])) / "rewrite_sources"
     batch_size = int(cfg.get("patcher_train", {}).get("batch_size", cfg.get("train", {}).get("batch_size", 8)))
 
-    train_dl, val_dl, tokenizer_path = build_first_patcher_dataloaders(cfg, output_root=output_root, batch_size=batch_size)
+    loaders, tokenizer_path = build_rewrite_dataloaders(cfg, output_root=output_root, batch_size=batch_size)
     print(f"Prepared rewrite dataloader assets under: {output_root}")
     print(f"Tokenizer: {tokenizer_path}")
-    print(f"Train batches: {len(train_dl)} | Val batches: {len(val_dl)}")
+    print(
+        "Patcher batches: "
+        f"train={len(loaders['patcher_train'])} val={len(loaders['patcher_val'])} | "
+        "Main batches: "
+        f"train={len(loaders['main_train'])} val={len(loaders['main_val'])}"
+    )
 
 
 if __name__ == "__main__":
